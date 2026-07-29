@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build macOS .app for OpenOats (Swift)
+# Build macOS .app for Live Interview Copilot (Swift)
 # Usage:
 #   ./scripts/build_swift_app.sh
 #
@@ -31,9 +31,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 ROOT_DIR="$(pwd)"
-SWIFT_DIR="$ROOT_DIR/OpenOats"
-APP_NAME="OpenOats"
-BUNDLE_ID="com.openoats.app"
+SWIFT_DIR="$ROOT_DIR/LiveInterviewCopilot"
+APP_NAME="Live Interview Copilot"
+APP_EXECUTABLE_NAME="LiveInterviewCopilot"
+BUNDLE_ID="com.jude864huang.liveinterviewcopilot.app"
 SKIP_SIGN="${SKIP_SIGN:-0}"
 SKIP_INSTALL="${SKIP_INSTALL:-0}"
 RELEASE_BUILD="${RELEASE_BUILD:-0}"
@@ -82,7 +83,7 @@ else
   # is enabled raises "unbound variable" instead of producing zero arguments.
   swift build -c "$APP_BUILD_CONFIGURATION" 2>&1
 fi
-BINARY_PATH=".build/$APP_BUILD_CONFIGURATION/OpenOats"
+BINARY_PATH=".build/$APP_BUILD_CONFIGURATION/LiveInterviewCopilot"
 
 if [[ ! -f "$BINARY_PATH" ]]; then
   echo "Build failed: binary not found at $BINARY_PATH"
@@ -99,18 +100,18 @@ mkdir -p "$APP_DIR/Contents/Resources"
 mkdir -p "$APP_DIR/Contents/Frameworks"
 
 # Copy binary
-cp "$BINARY_PATH" "$APP_DIR/Contents/MacOS/OpenOats"
+cp "$BINARY_PATH" "$APP_DIR/Contents/MacOS/$APP_EXECUTABLE_NAME"
 
 # Make the SwiftPM-built executable behave like a normal app bundle by
 # teaching dyld to search the app's embedded Frameworks directory.
-APP_BINARY="$APP_DIR/Contents/MacOS/OpenOats"
+APP_BINARY="$APP_DIR/Contents/MacOS/$APP_EXECUTABLE_NAME"
 if ! otool -l "$APP_BINARY" | grep -Fq "@executable_path/../Frameworks"; then
   install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_BINARY"
   echo "Added app Frameworks rpath to executable"
 fi
 
 # Copy Info.plist
-cp "$SWIFT_DIR/Sources/OpenOats/Info.plist" "$APP_DIR/Contents/Info.plist"
+cp "$SWIFT_DIR/Sources/LiveInterviewCopilot/Info.plist" "$APP_DIR/Contents/Info.plist"
 
 if [[ "$RELEASE_BUILD" == "1" ]]; then
   /usr/libexec/PlistBuddy -c "Set :SUFeedURL $SPARKLE_FEED_URL" "$APP_DIR/Contents/Info.plist"
@@ -136,7 +137,7 @@ else
 fi
 
 # Copy app icon
-ICON_PATH="$SWIFT_DIR/Sources/OpenOats/Assets/AppIcon.icns"
+ICON_PATH="$SWIFT_DIR/Sources/LiveInterviewCopilot/Assets/AppIcon.icns"
 if [[ -f "$ICON_PATH" ]]; then
   cp "$ICON_PATH" "$APP_DIR/Contents/Resources/AppIcon.icns"
   echo "App icon copied"
@@ -226,7 +227,7 @@ else
 
   # Sign the app
   if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
-    ENTITLEMENTS="$SWIFT_DIR/Sources/OpenOats/OpenOats.entitlements"
+    ENTITLEMENTS="$SWIFT_DIR/Sources/LiveInterviewCopilot/LiveInterviewCopilot.entitlements"
     echo "Signing with: $CODESIGN_IDENTITY"
 
     # Sign Sparkle components inside-out (innermost first)
@@ -290,7 +291,7 @@ else
     # A completely unsigned app has unreliable TCC behavior for microphone and
     # Documents access. Ad-hoc signing gives local development builds a proper
     # code identity even when no Apple signing certificate is installed.
-    ENTITLEMENTS="$SWIFT_DIR/Sources/OpenOats/OpenOats.entitlements"
+    ENTITLEMENTS="$SWIFT_DIR/Sources/LiveInterviewCopilot/LiveInterviewCopilot.entitlements"
     echo "No Apple signing identity found; applying ad-hoc signature"
     if [[ -d "$APP_DIR/Contents/Frameworks/Sparkle.framework" ]]; then
       codesign --force --deep --sign - "$APP_DIR/Contents/Frameworks/Sparkle.framework"
@@ -299,7 +300,7 @@ else
       codesign --force --sign - "$APP_DIR/Contents/Resources/node"
     fi
     codesign --force --sign - \
-      --requirements '=designated => identifier "com.openoats.app"' \
+      --requirements '=designated => identifier "com.jude864huang.liveinterviewcopilot.app"' \
       --entitlements "$ENTITLEMENTS" \
       "$APP_DIR"
     codesign --verify --deep --strict --verbose=2 "$APP_DIR"

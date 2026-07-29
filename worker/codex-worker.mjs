@@ -328,7 +328,7 @@ class CodexAppServerClient {
       cwd: process.cwd(),
       env: {
         ...process.env,
-        CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "openoats_interview_copilot"
+        CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "live_interview_copilot"
       },
         stdio: ["pipe", "pipe", "pipe"]
       }
@@ -347,8 +347,8 @@ class CodexAppServerClient {
 
     await this.rpc("initialize", {
       clientInfo: {
-        name: "openoats-interview-copilot",
-        title: "OpenOats Interview Copilot",
+        name: "live-interview-copilot",
+        title: "Live Interview Copilot",
         version: "1.0"
       },
       capabilities: {
@@ -582,7 +582,7 @@ class CodexAppServerClient {
     if (Object.hasOwn(message, "id") && message.method) {
       this.write({
         id: message.id,
-        error: { code: -32601, message: "OpenOats does not expose interactive app-server methods." }
+        error: { code: -32601, message: "Live Interview Copilot does not expose interactive app-server methods." }
       });
       return;
     }
@@ -726,7 +726,7 @@ async function generate(message) {
   try {
     let response;
     let transport = "app-server";
-    const forceSDK = process.env.OPENOATS_CODEX_TRANSPORT === "sdk";
+    const forceSDK = process.env.LIVE_INTERVIEW_COPILOT_CODEX_TRANSPORT === "sdk";
     if (!forceSDK && appServerTransportFailures < 2) {
       try {
         response = await appServer.generate(request, { signal: controller.signal, onDelta });
@@ -764,7 +764,7 @@ async function generate(message) {
 
 async function prewarm(id) {
   try {
-    if (process.env.OPENOATS_CODEX_TRANSPORT === "sdk") {
+    if (process.env.LIVE_INTERVIEW_COPILOT_CODEX_TRANSPORT === "sdk") {
       sdkClient(false);
       emit({ event: "completed", id, response: "sdk", transport: "sdk" });
       return;

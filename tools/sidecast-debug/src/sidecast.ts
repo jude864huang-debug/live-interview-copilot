@@ -116,7 +116,7 @@ async function callLLM(
       if (!settings.apiKey) throw new Error("OpenRouter API key is not set");
       url = "https://openrouter.ai/api/v1/chat/completions";
       headers["Authorization"] = `Bearer ${settings.apiKey}`;
-      headers["HTTP-Referer"] = "OpenOats/SidecastDebug";
+      headers["HTTP-Referer"] = "LiveInterviewCopilot/SidecastDebug";
       break;
     case "ollama": {
       const base = settings.baseURL.replace(/\/+$/, "");

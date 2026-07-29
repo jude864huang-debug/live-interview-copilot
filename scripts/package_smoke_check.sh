@@ -3,8 +3,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-APP_PATH="dist/OpenOats.app"
-APP_BINARY="$APP_PATH/Contents/MacOS/OpenOats"
+APP_PATH="dist/Live Interview Copilot.app"
+APP_BINARY="$APP_PATH/Contents/MacOS/LiveInterviewCopilot"
 INFO_PLIST="$APP_PATH/Contents/Info.plist"
 PKGINFO="$APP_PATH/Contents/PkgInfo"
 SPARKLE_FW="$APP_PATH/Contents/Frameworks/Sparkle.framework"

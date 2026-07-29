@@ -81,7 +81,7 @@ jobs:
 
       - name: Set version from tag
         run: |
-          PLIST="OpenOats/Sources/OpenOats/Info.plist"
+          PLIST="LiveInterviewCopilot/Sources/LiveInterviewCopilot/Info.plist"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${RELEASE_VERSION}" "$PLIST"
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${RELEASE_VERSION}" "$PLIST"
           echo "Set version to ${RELEASE_VERSION}"
@@ -165,9 +165,9 @@ jobs:
 
       - name: Verify signed and notarized artifacts
         run: |
-          codesign --verify --deep --strict --verbose=2 dist/OpenOats.app
-          spctl --assess --type execute --verbose=2 dist/OpenOats.app
-          xcrun stapler validate dist/OpenOats.dmg
+          codesign --verify --deep --strict --verbose=2 "dist/Live Interview Copilot.app"
+          spctl --assess --type execute --verbose=2 "dist/Live Interview Copilot.app"
+          xcrun stapler validate dist/Live-Interview-Copilot.dmg
 
       - name: Cleanup keychain
         if: always()
@@ -179,24 +179,24 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: OpenOats-dmg
-          path: dist/OpenOats.dmg
+          name: Live-Interview-Copilot-dmg
+          path: dist/Live-Interview-Copilot.dmg
 
       - name: Attach DMG to Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${RELEASE_TAG}" dist/OpenOats.dmg --clobber
+          gh release upload "${RELEASE_TAG}" dist/Live-Interview-Copilot.dmg --clobber
 
       - name: Sign DMG and update appcast
         env:
           SPARKLE_EDDSA_KEY: ${{ secrets.SPARKLE_EDDSA_KEY }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          DMG_PATH="dist/OpenOats.dmg"
+          DMG_PATH="dist/Live-Interview-Copilot.dmg"
 
           # Extract sign_update from Sparkle build artifacts
-          SIGN_UPDATE=$(find OpenOats/.build/artifacts/sparkle -name "sign_update" -type f 2>/dev/null | head -1)
+          SIGN_UPDATE=$(find LiveInterviewCopilot/.build/artifacts/sparkle -name "sign_update" -type f 2>/dev/null | head -1)
           if [[ -z "$SIGN_UPDATE" ]]; then
             echo "Error: sign_update not found in Sparkle artifacts"
             exit 1
@@ -217,7 +217,7 @@ jobs:
           echo "EdDSA signature: $ED_SIGNATURE"
           echo "DMG length: $DMG_LENGTH"
 
-          DMG_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/OpenOats.dmg"
+          DMG_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/Live-Interview-Copilot.dmg"
           PUB_DATE=$(date -u +"%a, %d %b %Y %H:%M:%S %z")
 
           # Clone gh-pages branch
@@ -228,9 +228,9 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
             <channel>
-              <title>OpenOats Updates</title>
+              <title>Live Interview Copilot Updates</title>
               <link>https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/gh-pages/appcast.xml</link>
-              <description>Most recent updates to OpenOats</description>
+              <description>Most recent updates to Live Interview Copilot</description>
               <language>en</language>
               <item>
                 <title>Version ${RELEASE_VERSION}</title>
@@ -261,18 +261,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          SHA256=$(shasum -a 256 dist/OpenOats.dmg | awk '{print $1}')
+          SHA256=$(shasum -a 256 dist/Live-Interview-Copilot.dmg | awk '{print $1}')
           REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
-          git clone --branch main --single-branch "$REPO_URL" /tmp/openoats-main
+          git clone --branch main --single-branch "$REPO_URL" /tmp/liveinterviewcopilot-main
 
-          chmod +x /tmp/openoats-main/scripts/update_homebrew_cask.sh
-          /tmp/openoats-main/scripts/update_homebrew_cask.sh "$RELEASE_VERSION" "$SHA256"
+          chmod +x /tmp/liveinterviewcopilot-main/scripts/update_homebrew_cask.sh
+          /tmp/liveinterviewcopilot-main/scripts/update_homebrew_cask.sh "$RELEASE_VERSION" "$SHA256"
 
-          cd /tmp/openoats-main
+          cd /tmp/liveinterviewcopilot-main
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Casks/openoats.rb
+          git add Casks/live-interview-copilot.rb
           if git diff --cached --quiet; then
             echo "No cask changes to commit"
             exit 0

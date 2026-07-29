@@ -9,7 +9,7 @@ fi
 VERSION="$1"
 SHA256="$2"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-CASK_PATH="$ROOT_DIR/Casks/openoats.rb"
+CASK_PATH="$ROOT_DIR/Casks/live-interview-copilot.rb"
 
 if [[ ! -f "$CASK_PATH" ]]; then
   echo "Cask not found at $CASK_PATH" >&2
@@ -20,6 +20,6 @@ fi
 path, version, sha256 = ARGV
 contents = File.read(path)
 contents.sub!(/version\s+"[^"]+"/, %(version "#{version}"))
-contents.sub!(/sha256\s+"[^"]+"/, %(sha256 "#{sha256}"))
+contents.sub!(/sha256\s+(?::no_check|"[^"]+")/, %(sha256 "#{sha256}"))
 File.write(path, contents)
 RUBY

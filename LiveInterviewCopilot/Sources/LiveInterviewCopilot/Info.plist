@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Live Interview Copilot</string>
+    <key>CFBundleDisplayName</key>
+    <string>Live Interview Copilot</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.jude864huang.liveinterviewcopilot.app</string>
+    <key>CFBundleVersion</key>
+    <string>1.22.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.22.0</string>
+    <key>CFBundleExecutable</key>
+    <string>LiveInterviewCopilot</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.jude864huang.liveinterviewcopilot.app</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>liveinterviewcopilot</string>
+            </array>
+        </dict>
+    </array>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>15.0</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Live Interview Copilot needs microphone access to transcribe your voice during interviews.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Live Interview Copilot needs system-audio recording access to transcribe interviewers in real time.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Live Interview Copilot can use your calendar to title interview sessions with the event name and participant information.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Live Interview Copilot uses Apple Notes to export interview notes.</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.productivity</string>
+    <key>LSMultipleInstancesProhibited</key>
+    <true/>
+    <key>SUFeedURL</key>
+    <string></string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUPublicEDKey</key>
+    <string></string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
+</dict>
+</plist>

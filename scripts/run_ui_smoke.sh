@@ -7,8 +7,8 @@ DERIVED_DATA_PATH="${DERIVED_DATA_PATH:-$PWD/.build/ui-smoke/DerivedData}"
 SOURCE_PACKAGES_PATH="${SOURCE_PACKAGES_PATH:-$PWD/.build/ui-smoke/SourcePackages}"
 
 COMMON_ARGS=(
-  -project UITests/OpenOatsUITestHost.xcodeproj
-  -scheme OpenOatsUITestHost
+  -project UITests/LiveInterviewCopilotUITestHost.xcodeproj
+  -scheme LiveInterviewCopilotUITestHost
   -destination 'platform=macOS'
   -derivedDataPath "$DERIVED_DATA_PATH"
   -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_PATH"
@@ -24,7 +24,7 @@ if [[ -d "$PRODUCTS_DIR" ]]; then
     xattr -r -d com.apple.quarantine "$path" 2>/dev/null || true
   done < <(
     find "$PRODUCTS_DIR" \
-      \( -name 'OpenOatsUITestHost.app' -o -name 'OpenOatsUITests-Runner.app' -o -name '*.xctest' \) \
+      \( -name 'LiveInterviewCopilotUITestHost.app' -o -name 'LiveInterviewCopilotUITests-Runner.app' -o -name '*.xctest' \) \
       -print
   )
 fi

@@ -1,5 +1,5 @@
 ---
-schema: openoats/v1
+schema: liveinterviewcopilot/v1
 title: "Notification System: Scope and Launch Plan"
 date: 2026-03-18T10:30:00+01:00
 duration: 11

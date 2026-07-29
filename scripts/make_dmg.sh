@@ -2,8 +2,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-APP_PATH="dist/OpenOats.app"
-DMG_PATH="dist/OpenOats.dmg"
+APP_PATH="dist/Live Interview Copilot.app"
+DMG_PATH="dist/Live-Interview-Copilot.dmg"
 RELEASE_BUILD="${RELEASE_BUILD:-0}"
 
 if [[ "$RELEASE_BUILD" != "0" && "$RELEASE_BUILD" != "1" ]]; then
@@ -21,7 +21,7 @@ rm -f "$DMG_PATH"
 
 # --- Create a styled DMG with "drag to Applications" layout ---
 STAGING_DIR="dist/dmg_staging"
-TEMP_DMG="dist/OpenOats_temp.dmg"
+TEMP_DMG="dist/Live-Interview-Copilot_temp.dmg"
 
 rm -rf "$STAGING_DIR" "$TEMP_DMG"
 mkdir -p "$STAGING_DIR"
@@ -38,7 +38,7 @@ elif [[ ! -e "$STAGING_DIR/Applications" ]]; then
 fi
 
 # Create a temporary read-write DMG
-hdiutil create -volname "OpenOats" -srcfolder "$STAGING_DIR" -ov -format UDRW "$TEMP_DMG"
+hdiutil create -volname "Live Interview Copilot" -srcfolder "$STAGING_DIR" -ov -format UDRW "$TEMP_DMG"
 
 # Mount it and configure the Finder window via AppleScript
 MOUNT_OUTPUT=$(hdiutil attach "$TEMP_DMG" -readwrite -noverify)
@@ -46,7 +46,7 @@ MOUNT_POINT=$(echo "$MOUNT_OUTPUT" | grep -o '/Volumes/.*' | head -1)
 
 osascript <<APPLESCRIPT
 tell application "Finder"
-  tell disk "OpenOats"
+  tell disk "Live Interview Copilot"
     open
     set current view of container window to icon view
     set toolbar visible of container window to false
@@ -55,7 +55,7 @@ tell application "Finder"
     set viewOptions to the icon view options of container window
     set arrangement of viewOptions to not arranged
     set icon size of viewOptions to 80
-    set position of item "OpenOats.app" of container window to {120, 150}
+    set position of item "Live Interview Copilot.app" of container window to {120, 150}
     set position of item "Applications" of container window to {420, 150}
     close
     open

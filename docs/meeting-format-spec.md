@@ -1,4 +1,4 @@
-# OpenOats Meeting Format Specification
+# LiveInterviewCopilot Meeting Format Specification
 
 **Version:** 1.0
 **Status:** Draft
@@ -31,7 +31,7 @@ The key words "MUST", "MUST NOT", "SHOULD", "SHOULD NOT", and "MAY" in this docu
 
 ## Overview
 
-The OpenOats Meeting Format (`.md`) is a structured Markdown format for meeting transcripts. It replaces OpenOats' plain `.txt` output with a file that is simultaneously human-readable, grep-friendly, Obsidian-native, and parseable by LLM agents.
+The LiveInterviewCopilot Meeting Format (`.md`) is a structured Markdown format for meeting transcripts. It replaces LiveInterviewCopilot' plain `.txt` output with a file that is simultaneously human-readable, grep-friendly, Obsidian-native, and parseable by LLM agents.
 
 ### Goals
 
@@ -89,7 +89,7 @@ Every file starts with a YAML frontmatter block.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `schema` | string | Yes | Format identifier. Always `openoats/v1` for this version. |
+| `schema` | string | Yes | Format identifier. Always `liveinterviewcopilot/v1` for this version. |
 | `title` | string | Yes | Meeting title. Auto-generated from conversation topic, calendar event, or user edit. The H1 heading in the body MUST be identical to the `title` frontmatter value (after YAML string parsing). |
 | `date` | ISO 8601 datetime | Yes | Meeting start time. Include timezone offset when available (e.g., `2026-03-20T14:00:00+01:00`). Omit timezone only if unknown. |
 | `duration` | integer | Yes | Meeting duration in minutes, rounded to nearest minute. MUST be a positive integer (>= 1). |
@@ -115,7 +115,7 @@ Every file starts with a YAML frontmatter block.
 
 ```yaml
 ---
-schema: openoats/v1
+schema: liveinterviewcopilot/v1
 title: "Meeting"
 date: 2026-03-20T14:00:00+01:00
 duration: 32
@@ -130,7 +130,7 @@ engine: parakeet-tdt-v2
 
 ```yaml
 ---
-schema: openoats/v1
+schema: liveinterviewcopilot/v1
 title: "Q1 Launch Planning"
 date: 2026-03-20T14:00:00+01:00
 duration: 47
@@ -152,7 +152,7 @@ app: zoom
 
 ## Processing Stages
 
-OpenOats produces this file in stages. Stage 2 refines Stage 1 output in-place (filler removal, punctuation, speaker correction). Stage 3 inserts new sections without modifying what Stage 1+2 wrote.
+LiveInterviewCopilot produces this file in stages. Stage 2 refines Stage 1 output in-place (filler removal, punctuation, speaker correction). Stage 3 inserts new sections without modifying what Stage 1+2 wrote.
 
 ### Stage 1: Transcription
 
@@ -346,7 +346,7 @@ Parsers SHOULD treat blank lines between transcript entries as cosmetic. They ca
 
 ### Current State: You/Them
 
-OpenOats captures two audio streams:
+LiveInterviewCopilot captures two audio streams:
 - **Microphone** (your voice) mapped to speaker `You`
 - **System audio** (remote participants) mapped to speaker `Them`
 
@@ -356,7 +356,7 @@ In Stage 1+2 output, `participants` is always `["You", "Them"]` and the transcri
 
 ### Future State: Named Participants
 
-When OpenOats gains participant identification (via calendar integration, manual labeling, or diarization), the format supports named speakers with no structural changes:
+When LiveInterviewCopilot gains participant identification (via calendar integration, manual labeling, or diarization), the format supports named speakers with no structural changes:
 
 ```yaml
 participants:
@@ -390,10 +390,10 @@ Any field prefixed with `x_` in the frontmatter is a valid extension field. This
 ### Examples
 
 ```yaml
-x_openoats_session: "session_2026-03-20_14-00-06"
-x_openoats_template: "customer-discovery"
+x_liveinterviewcopilot_session: "session_2026-03-20_14-00-06"
+x_liveinterviewcopilot_template: "customer-discovery"
 x_calendar_event_id: "abc123def456"
-x_project: "OpenOats v1.0"
+x_project: "LiveInterviewCopilot v1.0"
 x_confidence: 0.92
 ```
 
@@ -402,7 +402,7 @@ x_confidence: 0.92
 1. Extension fields MUST start with `x_`
 2. Extension fields are always optional. Implementations MUST NOT require any `x_` field for conformance.
 3. Parsers MUST ignore extension fields they do not recognize
-4. Tools SHOULD namespace their extensions: `x_toolname_field` (e.g., `x_openoats_session`)
+4. Tools SHOULD namespace their extensions: `x_toolname_field` (e.g., `x_liveinterviewcopilot_session`)
 5. Extension fields MUST follow all other frontmatter rules (flat structure, consistent types)
 
 ---
@@ -421,7 +421,7 @@ x_confidence: 0.92
 ```python
 import yaml
 
-def parse_openoats(filepath):
+def parse_liveinterviewcopilot(filepath):
     with open(filepath) as f:
         content = f.read()
 
@@ -433,7 +433,7 @@ def parse_openoats(filepath):
     meta = yaml.safe_load(parts[1])
     body = parts[2].strip()
 
-    if meta.get("schema") != "openoats/v1":
+    if meta.get("schema") != "liveinterviewcopilot/v1":
         raise ValueError(f"Unsupported schema: {meta.get('schema')}")
     return meta, body
 ```
@@ -518,35 +518,35 @@ function extractActions(body) {
 
 ```bash
 # All meetings with a specific speaker
-rg '\*\*Alice Chen\*\*:' ~/Documents/OpenOats/
+rg '\*\*Alice Chen\*\*:' ~/Documents/LiveInterviewCopilot/
 
 # Everything "Them" said in a specific meeting
-rg '\*\*Them\*\*:' ~/Documents/OpenOats/2026-03-20-1400-meeting.md
+rg '\*\*Them\*\*:' ~/Documents/LiveInterviewCopilot/2026-03-20-1400-meeting.md
 
 # All open action items across all meetings
-rg '^\- \[ \]' ~/Documents/OpenOats/
+rg '^\- \[ \]' ~/Documents/LiveInterviewCopilot/
 
 # Open action items assigned to You
-rg '\[ \].*\[owner:: You\]' ~/Documents/OpenOats/
+rg '\[ \].*\[owner:: You\]' ~/Documents/LiveInterviewCopilot/
 
 # Decisions (approximate - also grabs action items starting with "- ")
 # For precise extraction, use the Python parser
-rg '## Decisions' -A 10 ~/Documents/OpenOats/
+rg '## Decisions' -A 10 ~/Documents/LiveInterviewCopilot/
 
 # Meetings tagged with a specific topic (works with both YAML array styles)
-rg 'tags:.*product|^\s+- product$' ~/Documents/OpenOats/
+rg 'tags:.*product|^\s+- product$' ~/Documents/LiveInterviewCopilot/
 
 # Meetings that used Zoom
-rg '^app: zoom' ~/Documents/OpenOats/
+rg '^app: zoom' ~/Documents/LiveInterviewCopilot/
 
 # Meetings 60 minutes or longer
-rg '^duration: [6-9][0-9]$|^duration: [1-9][0-9]{2,}$' ~/Documents/OpenOats/
+rg '^duration: [6-9][0-9]$|^duration: [1-9][0-9]{2,}$' ~/Documents/LiveInterviewCopilot/
 
 # Find what was said about a topic
-rg -i 'launch date' ~/Documents/OpenOats/
+rg -i 'launch date' ~/Documents/LiveInterviewCopilot/
 
 # List all meeting files chronologically (filenames sort naturally)
-ls ~/Documents/OpenOats/*.md
+ls ~/Documents/LiveInterviewCopilot/*.md
 ```
 
 ### Obsidian Dataview Queries
@@ -554,15 +554,15 @@ ls ~/Documents/OpenOats/*.md
 List all meetings:
 ```dataview
 TABLE date, duration, participants
-FROM "OpenOats"
-WHERE schema = "openoats/v1"
+FROM "LiveInterviewCopilot"
+WHERE schema = "liveinterviewcopilot/v1"
 SORT date DESC
 ```
 
 Meetings tagged with a specific topic:
 ```dataview
 TABLE date, title, duration
-FROM "OpenOats"
+FROM "LiveInterviewCopilot"
 WHERE contains(tags, "product")
 SORT date DESC
 ```
@@ -570,14 +570,14 @@ SORT date DESC
 All open action items assigned to You:
 ```dataview
 TASK
-FROM "OpenOats"
+FROM "LiveInterviewCopilot"
 WHERE !completed AND contains(text, "owner:: You")
 ```
 
 All action items due this week:
 ```dataview
 TASK
-FROM "OpenOats"
+FROM "LiveInterviewCopilot"
 WHERE !completed AND date(due) >= date(today) AND date(due) <= date(today) + dur(7 days)
 SORT due ASC
 ```
@@ -585,7 +585,7 @@ SORT due ASC
 Meetings using a specific ASR engine:
 ```dataview
 TABLE date, title, duration
-FROM "OpenOats"
+FROM "LiveInterviewCopilot"
 WHERE engine = "parakeet-tdt-v2"
 SORT date DESC
 ```
@@ -593,7 +593,7 @@ SORT date DESC
 Today's meetings (for daily notes embeds):
 ```dataview
 TABLE title, duration
-FROM "OpenOats"
+FROM "LiveInterviewCopilot"
 WHERE dateformat(date(date), "yyyy-MM-dd") = dateformat(date(today), "yyyy-MM-dd")
 SORT date ASC
 ```
@@ -608,13 +608,13 @@ Meeting files connect to other vault notes through wikilinks in the body. The St
 
 ## Versioning
 
-The `schema` field identifies the format version. The current version is `openoats/v1`.
+The `schema` field identifies the format version. The current version is `liveinterviewcopilot/v1`.
 
 ### Compatibility Promise
 
 - **Patch changes** (bug fixes, clarifications) do not change the schema identifier
-- **Minor additions** (new optional fields, new optional sections) do not change the schema identifier. Parsers built for `openoats/v1` will continue to work.
-- **Breaking changes** (removing fields, changing required fields, changing the transcript line format) increment the version: `openoats/v2`
+- **Minor additions** (new optional fields, new optional sections) do not change the schema identifier. Parsers built for `liveinterviewcopilot/v1` will continue to work.
+- **Breaking changes** (removing fields, changing required fields, changing the transcript line format) increment the version: `liveinterviewcopilot/v2`
 
 ### Migration
 
@@ -628,7 +628,7 @@ This is what the app outputs immediately after a meeting, before any LLM post-pr
 
 ```markdown
 ---
-schema: openoats/v1
+schema: liveinterviewcopilot/v1
 title: "Meeting"
 date: 2026-03-20T14:00:00+01:00
 duration: 2
@@ -678,7 +678,7 @@ This is the same meeting after the user runs LLM post-processing. The Summary, A
 
 ```markdown
 ---
-schema: openoats/v1
+schema: liveinterviewcopilot/v1
 title: "Feature Flag Rollout: New Editor"
 date: 2026-03-20T14:00:00+01:00
 duration: 2
@@ -775,7 +775,7 @@ LLMs weight the beginning and end of context windows more heavily than the middl
 
 ### Why simple participant arrays, not structured objects
 
-`participants: [You, Them]` vs `participants: [{name: You, role: host}]`. The simple array keeps frontmatter under 20 lines, works with basic Dataview queries without DataviewJS, and does not force OpenOats to know information it does not have (email, role). Rich participant data can live in `x_` extension fields.
+`participants: [You, Them]` vs `participants: [{name: You, role: host}]`. The simple array keeps frontmatter under 20 lines, works with basic Dataview queries without DataviewJS, and does not force LiveInterviewCopilot to know information it does not have (email, role). Rich participant data can live in `x_` extension fields.
 
 ### Why Dataview inline fields for action items
 
@@ -785,9 +785,9 @@ LLMs weight the beginning and end of context windows more heavily than the middl
 
 The filename is the identifier. `2026-03-20-1400-weekly-product-sync.md` is unique, human-readable, and does not require a generator. If cross-system referencing is needed later, use `x_uuid` as an extension field.
 
-### Why `schema: openoats/v1` not `schema_version: "1.0"`
+### Why `schema: liveinterviewcopilot/v1` not `schema_version: "1.0"`
 
-A namespaced identifier (`openoats/v1`) is more specific than a bare version number. If another tool adopts this format, it can use `openoats/v1` to signal compatibility. Future versions (`openoats/v2`) can include migration notes.
+A namespaced identifier (`liveinterviewcopilot/v1`) is more specific than a bare version number. If another tool adopts this format, it can use `liveinterviewcopilot/v1` to signal compatibility. Future versions (`liveinterviewcopilot/v2`) can include migration notes.
 
 ---
 
