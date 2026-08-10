@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { pathToFileURL } from "node:url";
@@ -8,6 +10,9 @@ import { Codex } from "@openai/codex-sdk";
 const require = createRequire(import.meta.url);
 const cancelled = new Set();
 const controllers = new Map();
+let compatibleModelCatalogPath;
+let compatibleCodexHomePath;
+const originalCodexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 
 const FAST_BASE_INSTRUCTIONS = `
 You are a low-latency interview copilot formatter. Follow the user's interview
@@ -213,6 +218,109 @@ export const followUpAnswerOutputSchema = {
   }
 };
 
+// Codex CLI validates every entry in model_catalog_json. Older Codex Router
+// catalogs can omit this field for external models, which prevents app-server
+// and the SDK from starting before the interview request is even handled.
+export function normalizeModelCatalog(catalog) {
+  const models = Array.isArray(catalog)
+    ? catalog
+    : catalog && Array.isArray(catalog.models)
+      ? catalog.models
+      : null;
+  if (!models) return { catalog, changed: false };
+
+  let changed = false;
+  const normalizedModels = models.map((model) => {
+    if (!model || typeof model !== "object" || Object.hasOwn(model, "supports_reasoning_summaries")) {
+      return model;
+    }
+    changed = true;
+    return { ...model, supports_reasoning_summaries: false };
+  });
+
+  if (!changed) return { catalog, changed: false };
+  return {
+    catalog: Array.isArray(catalog) ? normalizedModels : { ...catalog, models: normalizedModels },
+    changed: true
+  };
+}
+
+export function configWithModelCatalogPath(config, modelCatalogPath) {
+  const value = `model_catalog_json = ${JSON.stringify(modelCatalogPath)}`;
+  if (/^\s*model_catalog_json\s*=.*$/m.test(config)) {
+    return config.replace(/^\s*model_catalog_json\s*=.*$/m, value);
+  }
+  return `${config.trimEnd()}\n${value}\n`;
+}
+
+function configuredModelCatalogPath() {
+  const configPath = path.join(originalCodexHome, "config.toml");
+  try {
+    const config = fs.readFileSync(configPath, "utf8");
+    const match = config.match(/^\s*model_catalog_json\s*=\s*"([^\"]+)"\s*$/m);
+    if (match?.[1]) return path.resolve(originalCodexHome, match[1]);
+  } catch {
+    // Let Codex report the original configuration error if the config is
+    // unavailable. The compatibility path is only an opportunistic fix.
+  }
+  return path.join(originalCodexHome, "codex-router", "merged-models.json");
+}
+
+function compatibleModelCatalog() {
+  if (compatibleModelCatalogPath && fs.existsSync(compatibleModelCatalogPath)) {
+    return compatibleModelCatalogPath;
+  }
+
+  const sourcePath = configuredModelCatalogPath();
+  try {
+    const source = JSON.parse(fs.readFileSync(sourcePath, "utf8"));
+    const normalized = normalizeModelCatalog(source);
+    if (!normalized.changed) return undefined;
+
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "live-interview-codex-"));
+    compatibleModelCatalogPath = path.join(directory, "model-catalog.json");
+    fs.writeFileSync(compatibleModelCatalogPath, JSON.stringify(normalized.catalog));
+    return compatibleModelCatalogPath;
+  } catch {
+    return undefined;
+  }
+}
+
+// Codex parses $CODEX_HOME/config.toml before command-line overrides. If that
+// file points to an older catalog, parsing fails before our -c override can be
+// applied. Isolate the child in a temporary home with the normalized catalog;
+// auth remains a symlink so no credential material is copied or persisted.
+function configureCompatibleCodexHome() {
+  if (compatibleCodexHomePath) {
+    process.env.CODEX_HOME = compatibleCodexHomePath;
+    return;
+  }
+
+  const modelCatalogPath = compatibleModelCatalog();
+  if (!modelCatalogPath) return;
+
+  try {
+    const sourceConfigPath = path.join(originalCodexHome, "config.toml");
+    const sourceConfig = fs.readFileSync(sourceConfigPath, "utf8");
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "live-interview-codex-home-"));
+    fs.writeFileSync(
+      path.join(directory, "config.toml"),
+      configWithModelCatalogPath(sourceConfig, modelCatalogPath)
+    );
+
+    const sourceAuthPath = path.join(originalCodexHome, "auth.json");
+    if (fs.existsSync(sourceAuthPath)) {
+      fs.symlinkSync(sourceAuthPath, path.join(directory, "auth.json"));
+    }
+
+    compatibleCodexHomePath = directory;
+    process.env.CODEX_HOME = directory;
+  } catch {
+    // Keep the user's normal Codex home if an isolated compatibility home
+    // cannot be prepared. The worker will report the original CLI error.
+  }
+}
+
 export function schemaForKind(kind) {
   if (kind === "answer") return progressiveAnswerOutputSchema;
   if (kind === "referenceAnswer") return referenceAnswerOutputSchema;
@@ -238,7 +346,7 @@ export function normalizeGenerateMessage(message) {
       ? Math.max(64, Math.min(2_600, Math.floor(parsedBudget)))
       : defaultBudget,
     fastServiceTier: Boolean(message?.fast_service_tier ?? message?.fastServiceTier ?? false),
-    reasoningEffort: ["none", "low", "medium"].includes(message?.reasoning_effort ?? message?.reasoningEffort)
+    reasoningEffort: ["none", "low", "medium", "high", "xhigh"].includes(message?.reasoning_effort ?? message?.reasoningEffort)
       ? (message.reasoning_effort ?? message.reasoningEffort)
       : "low"
   };
@@ -319,11 +427,17 @@ class CodexAppServerClient {
   }
 
   async startInternal() {
+    configureCompatibleCodexHome();
     const packageJSON = require.resolve("@openai/codex/package.json");
     const codexScript = path.join(path.dirname(packageJSON), "bin", "codex.js");
+    const modelCatalogPath = compatibleModelCatalog();
+    const codexArguments = ["app-server", "--stdio", "--disable", "remote_models"];
+    if (modelCatalogPath) {
+      codexArguments.push("-c", `model_catalog_json=${JSON.stringify(modelCatalogPath)}`);
+    }
     const child = spawn(
       process.execPath,
-      [codexScript, "app-server", "--stdio", "--disable", "remote_models"],
+      [codexScript, ...codexArguments],
       {
       cwd: process.cwd(),
       env: {
@@ -662,10 +776,13 @@ function sdkClient(fastServiceTier) {
   const key = fastServiceTier ? "priority" : "default";
   let client = sdkClients.get(key);
   if (!client) {
+    configureCompatibleCodexHome();
     const config = {
       model_verbosity: "low",
       web_search: "disabled"
     };
+    const modelCatalogPath = compatibleModelCatalog();
+    if (modelCatalogPath) config.model_catalog_json = modelCatalogPath;
     if (fastServiceTier) config.service_tier = "priority";
     client = new Codex({ config });
     sdkClients.set(key, client);

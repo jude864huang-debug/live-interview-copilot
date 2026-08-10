@@ -1,0 +1,131 @@
+{
+  "summary": {
+    "model": "gpt-5.6-terra",
+    "provider": "deepseek",
+    "apiModel": "deepseek-v4-flash",
+    "effort": "low",
+    "maxOutputTokens": 2400,
+    "promptCacheKey": "benchmark-gpt-5.6-terra-low",
+    "cli": null,
+    "cliTotal": null,
+    "api": {
+      "count": 5,
+      "min": 2150,
+      "mean": 6871.8,
+      "median": 8172,
+      "p90": 10770,
+      "max": 10770
+    },
+    "apiTotal": {
+      "count": 5,
+      "min": 6791,
+      "mean": 10499,
+      "median": 11195,
+      "p90": 14891,
+      "max": 14891
+    },
+    "apiSkipped": null
+  },
+  "rows": [
+    {
+      "path": "api",
+      "round": 1,
+      "ok": true,
+      "firstDeltaMs": 3337,
+      "totalMs": 7159,
+      "outputChars": 1467,
+      "transport": "deepseek-responses",
+      "usage": {
+        "input_tokens": 701,
+        "input_tokens_details": {
+          "cached_tokens": 640
+        },
+        "output_tokens": 757,
+        "output_tokens_details": {
+          "reasoning_tokens": 226
+        },
+        "total_tokens": 1458
+      }
+    },
+    {
+      "path": "api",
+      "round": 2,
+      "ok": true,
+      "firstDeltaMs": 8172,
+      "totalMs": 11195,
+      "outputChars": 1793,
+      "transport": "deepseek-responses",
+      "usage": {
+        "input_tokens": 701,
+        "input_tokens_details": {
+          "cached_tokens": 640
+        },
+        "output_tokens": 1498,
+        "output_tokens_details": {
+          "reasoning_tokens": 862
+        },
+        "total_tokens": 2199
+      }
+    },
+    {
+      "path": "api",
+      "round": 3,
+      "ok": true,
+      "firstDeltaMs": 2150,
+      "totalMs": 6791,
+      "outputChars": 1575,
+      "transport": "deepseek-responses",
+      "usage": {
+        "input_tokens": 701,
+        "input_tokens_details": {
+          "cached_tokens": 640
+        },
+        "output_tokens": 697,
+        "output_tokens_details": {
+          "reasoning_tokens": 118
+        },
+        "total_tokens": 1398
+      }
+    },
+    {
+      "path": "api",
+      "round": 4,
+      "ok": true,
+      "firstDeltaMs": 9930,
+      "totalMs": 14891,
+      "outputChars": 1626,
+      "transport": "deepseek-responses",
+      "usage": {
+        "input_tokens": 701,
+        "input_tokens_details": {
+          "cached_tokens": 640
+        },
+        "output_tokens": 1346,
+        "output_tokens_details": {
+          "reasoning_tokens": 716
+        },
+        "total_tokens": 2047
+      }
+    },
+    {
+      "path": "api",
+      "round": 5,
+      "ok": true,
+      "firstDeltaMs": 10770,
+      "totalMs": 12459,
+      "outputChars": 1153,
+      "transport": "deepseek-responses",
+      "usage": {
+        "input_tokens": 701,
+        "input_tokens_details": {
+          "cached_tokens": 640
+        },
+        "output_tokens": 1224,
+        "output_tokens_details": {
+          "reasoning_tokens": 807
+        },
+        "total_tokens": 1925
+      }
+    }
+  ]
+}

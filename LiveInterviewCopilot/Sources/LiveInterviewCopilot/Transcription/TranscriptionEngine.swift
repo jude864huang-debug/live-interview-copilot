@@ -81,6 +81,12 @@ final class TranscriptionEngine {
         case showNoAudioError
     }
 
+    enum SystemAudioHealthAction: Equatable {
+        case none
+        case restartCapture
+        case showNoAudioError
+    }
+
     private struct PreparedCloudStartBackend {
         let model: TranscriptionModel
         let backend: any TranscriptionBackend
@@ -285,8 +291,12 @@ final class TranscriptionEngine {
     private var defaultOutputDeviceListenerBlock: AudioObjectPropertyListenerBlock?
     private var micRestartTask: Task<Void, Never>?
     private var sysRestartTask: Task<Void, Never>?
+    private var systemAudioHealthTask: Task<Void, Never>?
     private var pendingMicDeviceID: AudioDeviceID?
     private var pendingSystemAudioRestart = false
+    private var systemAudioHealthStartedAt: Date?
+    private var lastObservedSystemAudioFrameAt: Date?
+    private var systemAudioRecoveryAttempted = false
 
     init(transcriptStore: TranscriptStore, settings: AppSettings, mode: Mode = .live) {
         self.transcriptStore = transcriptStore
@@ -307,6 +317,20 @@ final class TranscriptionEngine {
     ) -> MicStartupHealthAction {
         guard !hasCapturedFrames, captureError == nil else { return .none }
         return hasRetried ? .showNoAudioError : .retryCapture
+    }
+
+    static func systemAudioHealthAction(
+        lastFrameAt: Date?,
+        monitoringStartedAt: Date,
+        now: Date,
+        isPaused: Bool,
+        hasAttemptedRecovery: Bool,
+        noFrameTimeout: TimeInterval = 6
+    ) -> SystemAudioHealthAction {
+        guard !isPaused else { return .none }
+        let mostRecentActivity = lastFrameAt ?? monitoringStartedAt
+        guard now.timeIntervalSince(mostRecentActivity) >= noFrameTimeout else { return .none }
+        return hasAttemptedRecovery ? .showNoAudioError : .restartCapture
     }
 
     func refreshModelAvailability() {
@@ -478,6 +502,7 @@ final class TranscriptionEngine {
             installDefaultDeviceListener()
             installDefaultOutputDeviceListener()
             scheduleInterviewMicHealthCheck(inputDeviceID: inputDeviceID, resolvedDeviceID: targetMicID)
+            scheduleSystemAudioHealthCheck()
             assetStatus = manualInterviewAudioSink == nil
                 ? "GPT Realtime audio active"
                 : "Interview audio active"
@@ -696,6 +721,7 @@ final class TranscriptionEngine {
         // Install CoreAudio listeners for live device routing changes
         installDefaultDeviceListener()
         installDefaultOutputDeviceListener()
+        scheduleSystemAudioHealthCheck()
     }
 
     /// Restart only the mic capture with a new device, keeping system audio and models intact.
@@ -843,10 +869,15 @@ final class TranscriptionEngine {
         removeDefaultOutputDeviceListener()
         micRestartTask?.cancel()
         sysRestartTask?.cancel()
+        systemAudioHealthTask?.cancel()
         micRestartTask = nil
         sysRestartTask = nil
+        systemAudioHealthTask = nil
         pendingMicDeviceID = nil
         pendingSystemAudioRestart = false
+        systemAudioHealthStartedAt = nil
+        lastObservedSystemAudioFrameAt = nil
+        systemAudioRecoveryAttempted = false
         micKeepAliveTask?.cancel()
 
         micCapture.finishStream()
@@ -899,10 +930,15 @@ final class TranscriptionEngine {
         removeDefaultOutputDeviceListener()
         micRestartTask?.cancel()
         sysRestartTask?.cancel()
+        systemAudioHealthTask?.cancel()
         micRestartTask = nil
         sysRestartTask = nil
+        systemAudioHealthTask = nil
         pendingMicDeviceID = nil
         pendingSystemAudioRestart = false
+        systemAudioHealthStartedAt = nil
+        lastObservedSystemAudioFrameAt = nil
+        systemAudioRecoveryAttempted = false
         micTask?.cancel()
         sysTask?.cancel()
         micKeepAliveTask?.cancel()
@@ -977,8 +1013,13 @@ final class TranscriptionEngine {
         Log.transcription.info("Mic restarted on device \(targetMicID, privacy: .public)")
     }
 
-    private func restartSystemAudio() {
+    private func restartSystemAudio(resetHealthRecovery: Bool = true) {
         guard isRunning else { return }
+        systemAudioHealthStartedAt = Date()
+        lastObservedSystemAudioFrameAt = nil
+        if resetHealthRecovery {
+            systemAudioRecoveryAttempted = false
+        }
         pendingSystemAudioRestart = true
 
         if sysRestartTask != nil {
@@ -1011,16 +1052,73 @@ final class TranscriptionEngine {
 
         sysTask = nil
         await systemCapture.stop()
+        let didRestart: Bool
         if realtimeInterviewAudioSink != nil || manualInterviewAudioSink != nil {
-            await startRealtimeSystemCapture()
+            didRestart = await startRealtimeSystemCapture(isRestart: true)
         } else if let vadManager {
-            await startSystemAudioStream(locale: settings.locale, vadManager: vadManager)
+            didRestart = await startSystemAudioStream(
+                locale: settings.locale,
+                vadManager: vadManager,
+                isRestart: true
+            )
         } else {
             lastError = "System audio restart failed because the transcription pipeline is unavailable."
             return
         }
 
-        Log.transcription.info("System audio stream restarted")
+        if didRestart {
+            Log.transcription.info("System audio stream restarted")
+        } else {
+            Log.transcription.error("System audio stream restart failed")
+        }
+    }
+
+    private func scheduleSystemAudioHealthCheck() {
+        systemAudioHealthTask?.cancel()
+        systemAudioHealthStartedAt = Date()
+        lastObservedSystemAudioFrameAt = systemCapture.lastFrameAt
+        systemAudioRecoveryAttempted = false
+
+        systemAudioHealthTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled, self.isRunning else { return }
+
+                let now = Date()
+                let lastFrameAt = self.systemCapture.lastFrameAt
+                if let lastFrameAt,
+                   lastFrameAt > (self.lastObservedSystemAudioFrameAt ?? .distantPast) {
+                    self.lastObservedSystemAudioFrameAt = lastFrameAt
+                    self.systemAudioRecoveryAttempted = false
+                    self.clearSystemAudioErrorIfPresent()
+                }
+
+                let action = Self.systemAudioHealthAction(
+                    lastFrameAt: lastFrameAt,
+                    monitoringStartedAt: self.systemAudioHealthStartedAt ?? now,
+                    now: now,
+                    isPaused: self.isRecordingPaused,
+                    hasAttemptedRecovery: self.systemAudioRecoveryAttempted
+                )
+
+                switch action {
+                case .none:
+                    continue
+                case .restartCapture:
+                    self.systemAudioRecoveryAttempted = true
+                    self.systemAudioHealthStartedAt = now
+                    Log.transcription.error("System audio produced no frames for 6 seconds; rebuilding capture tap")
+                    self.restartSystemAudio(resetHealthRecovery: false)
+                case .showNoAudioError:
+                    let message = self.systemAudioNoFramesMessage(afterRecovery: true)
+                    self.lastError = message
+                    Log.transcription.error("\(message, privacy: .public)")
+                    return
+                }
+            }
+        }
     }
 
     private func startMicStream(
@@ -1085,7 +1183,8 @@ final class TranscriptionEngine {
         }
     }
 
-    private func startRealtimeSystemCapture() async {
+    @discardableResult
+    private func startRealtimeSystemCapture(isRestart: Bool = false) async -> Bool {
         do {
             let outputID: AudioDeviceID? = settings.outputDeviceID == 0 ? nil : settings.outputDeviceID
             let streams = try await systemCapture.bufferStream(outputDeviceID: outputID)
@@ -1110,8 +1209,10 @@ final class TranscriptionEngine {
                     }
                 }
             }
+            return true
         } catch {
-            lastError = "Failed to start interview system audio: \(error.localizedDescription)"
+            lastError = systemAudioStartFailureMessage(error, isRestart: isRestart)
+            return false
         }
     }
 
@@ -1150,10 +1251,12 @@ final class TranscriptionEngine {
         }
     }
 
+    @discardableResult
     private func startSystemAudioStream(
         locale: Locale,
-        vadManager: VadManager
-    ) async {
+        vadManager: VadManager,
+        isRestart: Bool = false
+    ) async -> Bool {
         Log.transcription.info("Starting system audio capture")
 
         let sysStreams: SystemAudioCapture.CaptureStreams
@@ -1171,10 +1274,10 @@ final class TranscriptionEngine {
             Log.transcription.info("System audio capture started")
             clearSystemAudioErrorIfPresent()
         } catch {
-            let msg = "Failed to start system audio: \(error.localizedDescription)"
+            let msg = systemAudioStartFailureMessage(error, isRestart: isRestart)
             Log.transcription.error("Failed to start system audio: \(error, privacy: .public)")
             lastError = msg
-            return
+            return false
         }
 
         var sysStream = sysStreams.systemAudio
@@ -1252,12 +1355,13 @@ final class TranscriptionEngine {
             }
         ) else {
             lastError = "Failed to create the system-audio transcriber. Try restarting."
-            return
+            return false
         }
 
         sysTask = Task.detached {
             await sysTranscriber.run(stream: sysStream)
         }
+        return true
     }
 
     private func makeTranscriber(
@@ -1468,10 +1572,36 @@ final class TranscriptionEngine {
         return identifier.split(separator: "-").first.map { String($0).lowercased() }
     }
 
+    private func selectedOutputDeviceDescription() -> String {
+        let devices = SystemAudioCapture.availableOutputDevices()
+        if settings.outputDeviceID > 0 {
+            return devices.first(where: { $0.id == settings.outputDeviceID })?.name
+                ?? settings.outputDeviceName
+                ?? "已选输出设备（ID \(settings.outputDeviceID)）"
+        }
+
+        guard let defaultID = try? SystemAudioCapture.defaultOutputDeviceID() else {
+            return "系统默认输出设备"
+        }
+        let defaultName = devices.first(where: { $0.id == defaultID })?.name
+        return defaultName.map { "系统默认输出设备“\($0)”" } ?? "系统默认输出设备（ID \(defaultID)）"
+    }
+
+    private func systemAudioStartFailureMessage(_ error: Error, isRestart: Bool) -> String {
+        let action = isRestart ? "重新连接" : "启动"
+        return "系统音频\(action)失败（输出设备：\(selectedOutputDeviceDescription())）：\(error.localizedDescription)。请确认面试软件正输出到该设备，或在设置中重新选择扬声器。"
+    }
+
+    private func systemAudioNoFramesMessage(afterRecovery: Bool) -> String {
+        let recoveryDetail = afterRecovery ? "自动重连后仍" : ""
+        return "系统音频\(recoveryDetail)连续 6 秒没有收到音频帧（输出设备：\(selectedOutputDeviceDescription())）。请确认面试软件正输出到该设备，或在设置中重新选择扬声器。"
+    }
+
     private func clearSystemAudioErrorIfPresent() {
         guard let lastError else { return }
         if lastError.localizedCaseInsensitiveContains("system audio") ||
-            lastError.localizedCaseInsensitiveContains("audio output device") {
+            lastError.localizedCaseInsensitiveContains("audio output device") ||
+            lastError.contains("系统音频") {
             self.lastError = nil
         }
     }

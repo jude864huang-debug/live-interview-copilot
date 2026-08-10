@@ -16,7 +16,35 @@ enum InterviewInferencePreference: String, Codable, CaseIterable, Sendable {
         switch self {
         case .realtimePreferred: "GPT Realtime 优先"
         case .apiPreferred: "API 优先"
-        case .codexOnly: "仅 Codex Pro"
+        case .codexOnly: "仅 Codex CLI"
+        }
+    }
+}
+
+enum InterviewAPIProvider: String, Codable, CaseIterable, Identifiable, Sendable {
+    case openAI
+    case deepSeek
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .openAI: "OpenAI"
+        case .deepSeek: "DeepSeek"
+        }
+    }
+}
+
+enum InterviewAPIProtocol: String, Codable, CaseIterable, Identifiable, Sendable {
+    case chatCompletion = "chat_completion"
+    case responses
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .chatCompletion: "Chat Completions"
+        case .responses: "Responses API"
         }
     }
 }
@@ -25,14 +53,16 @@ enum InterviewProvider: String, Codable, Sendable {
     case local
     case openAIRealtime
     case openAIAPI
+    case deepSeekAPI
     case codexSubscription
 
     var label: String {
         switch self {
         case .local: "本地骨架"
         case .openAIRealtime: "GPT Realtime"
-        case .openAIAPI: "OpenAI API"
-        case .codexSubscription: "Codex Pro"
+        case .openAIAPI: "API"
+        case .deepSeekAPI: "API"
+        case .codexSubscription: "Codex CLI"
         }
     }
 }
@@ -49,6 +79,41 @@ enum InterviewReasoningEffort: String, Codable, Sendable {
     case none
     case low
     case medium
+    case high
+    case xhigh
+
+    var label: String {
+        switch self {
+        case .none: "关闭"
+        case .low: "低"
+        case .medium: "中"
+        case .high: "高"
+        case .xhigh: "Extra High"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .none: "最低延迟，不额外展开思考"
+        case .low: "平衡延迟与判断质量"
+        case .medium: "更充分的分析，响应会更慢"
+        case .high: "高强度分析，延迟和消耗更高"
+        case .xhigh: "Extra High，最充分的分析，延迟最高"
+        }
+    }
+
+    /// Value sent to OpenAI-compatible Chat Completions providers that accept
+    /// the `reasoning_effort` parameter. DeepSeek and older chat models do not
+    /// support it, so callers must gate on the provider before sending it.
+    var chatCompletionValue: String {
+        switch self {
+        case .none: "low"
+        case .low: "low"
+        case .medium: "medium"
+        case .high: "high"
+        case .xhigh: "high"
+        }
+    }
 }
 
 enum CopilotGenerationState: String, Codable, Sendable {
@@ -85,6 +150,23 @@ enum InterviewQuestionType: String, Codable, CaseIterable, Sendable {
         case .followUp: "追问"
         case .other: "通用题"
         }
+    }
+
+    /// json_object providers do not enforce enum values. Accept the raw enum
+    /// id, common camelCase variants, and the Chinese UI label; fall back to
+    /// `.other` only for genuinely unknown values.
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        let normalized = Self.normalized(raw)
+        self = Self(rawValue: raw)
+            ?? Self.allCases.first {
+                Self.normalized($0.rawValue) == normalized || $0.label == raw
+            }
+            ?? .other
+    }
+
+    private static func normalized(_ value: String) -> String {
+        value.lowercased().filter { $0.isLetter || $0.isNumber }
     }
 }
 
@@ -185,11 +267,27 @@ enum InterviewAnswerClaimType: String, Codable, CaseIterable, Sendable {
     case candidateFact
     case professionalJudgment
     case explicitAssumption
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        let normalized = raw.lowercased().filter { $0.isLetter || $0.isNumber }
+        self = Self(rawValue: raw)
+            ?? Self.allCases.first { $0.rawValue.lowercased().filter { $0.isLetter || $0.isNumber } == normalized }
+            ?? .professionalJudgment
+    }
 }
 
 enum InterviewAnswerEntryMode: String, Codable, CaseIterable, Sendable {
     case directAnswer
     case conditionalAnswer
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        let normalized = raw.lowercased().filter { $0.isLetter || $0.isNumber }
+        self = Self(rawValue: raw)
+            ?? Self.allCases.first { $0.rawValue.lowercased().filter { $0.isLetter || $0.isNumber } == normalized }
+            ?? .directAnswer
+    }
 }
 
 enum InterviewAnswerSpineRole: String, Codable, CaseIterable, Sendable {
@@ -202,12 +300,28 @@ enum InterviewAnswerSpineRole: String, Codable, CaseIterable, Sendable {
     case validation
     case reflection
     case fit
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        let normalized = raw.lowercased().filter { $0.isLetter || $0.isNumber }
+        self = Self(rawValue: raw)
+            ?? Self.allCases.first { $0.rawValue.lowercased().filter { $0.isLetter || $0.isNumber } == normalized }
+            ?? .context
+    }
 }
 
 enum InterviewAnswerMode: String, Codable, CaseIterable, Sendable {
     case groundedExperience
     case professionalJudgment
     case hypotheticalPlan
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        let normalized = raw.lowercased().filter { $0.isLetter || $0.isNumber }
+        self = Self(rawValue: raw)
+            ?? Self.allCases.first { $0.rawValue.lowercased().filter { $0.isLetter || $0.isNumber } == normalized }
+            ?? .professionalJudgment
+    }
 }
 
 struct InterviewAnswerEntry: Codable, Equatable, Sendable {
@@ -246,6 +360,39 @@ struct InterviewAnswerMetadata: Codable, Equatable, Sendable {
     var questionType: InterviewQuestionType
     var answerMode: InterviewAnswerMode
     var concreteGaps: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case questionType
+        case answerMode
+        case concreteGaps
+    }
+
+    init(questionType: InterviewQuestionType, answerMode: InterviewAnswerMode, concreteGaps: [String]) {
+        self.questionType = questionType
+        self.answerMode = answerMode
+        self.concreteGaps = concreteGaps
+    }
+
+    /// DeepSeek and other json_object providers do not enforce the schema's
+    /// enums. A localized or off-schema questionType must not invalidate an
+    /// otherwise complete answer; fall back to `.other` instead.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let raw = try? container.decode(String.self, forKey: .questionType) {
+            questionType = InterviewQuestionType(rawValue: raw) ?? .other
+        } else {
+            questionType = .other
+        }
+        answerMode = (try? container.decode(InterviewAnswerMode.self, forKey: .answerMode)) ?? .professionalJudgment
+        concreteGaps = (try? container.decode([String].self, forKey: .concreteGaps)) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(questionType.rawValue, forKey: .questionType)
+        try container.encode(answerMode, forKey: .answerMode)
+        try container.encode(concreteGaps, forKey: .concreteGaps)
+    }
 }
 
 struct InterviewProgressiveAnswer: Codable, Equatable, Sendable {
@@ -573,6 +720,8 @@ struct InterviewGenerationRequest: Sendable {
     let kind: InterviewRequestKind
     let fastServiceTier: Bool
     let reasoningEffort: InterviewReasoningEffort
+    let apiProtocol: InterviewAPIProtocol
+    let apiBaseURL: String
 
     init(
         id: UUID,
@@ -582,7 +731,9 @@ struct InterviewGenerationRequest: Sendable {
         maxOutputTokens: Int,
         kind: InterviewRequestKind,
         fastServiceTier: Bool = false,
-        reasoningEffort: InterviewReasoningEffort = .low
+        reasoningEffort: InterviewReasoningEffort = .low,
+        apiProtocol: InterviewAPIProtocol = .responses,
+        apiBaseURL: String = "https://api.openai.com"
     ) {
         self.id = id
         self.model = model
@@ -592,6 +743,8 @@ struct InterviewGenerationRequest: Sendable {
         self.kind = kind
         self.fastServiceTier = fastServiceTier
         self.reasoningEffort = reasoningEffort
+        self.apiProtocol = apiProtocol
+        self.apiBaseURL = apiBaseURL
     }
 }
 

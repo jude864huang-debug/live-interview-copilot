@@ -74,6 +74,66 @@ actor OpenRouterClient {
         return components.url
     }
 
+    /// Builds an OpenAI-compatible models URL from a user-provided base URL.
+    /// Accepts roots with or without `/v1`, `/v1/models`, and provider-specific
+    /// API paths such as OpenRouter's `/api/v1/...`.
+    static func modelsURL(from rawBase: String) -> URL? {
+        let trimmed = rawBase.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var components = URLComponents(string: trimmed),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = components.host,
+              !host.isEmpty else {
+            return nil
+        }
+
+        var path = components.path
+        while path.hasSuffix("/") {
+            path.removeLast()
+        }
+
+        for suffix in ["/v1/models", "/v1/chat/completions", "/v1/responses", "/v1"] {
+            if path.hasSuffix(suffix) {
+                path.removeLast(suffix.count)
+                break
+            }
+        }
+
+        components.path = path.isEmpty ? "/v1/models" : path + "/v1/models"
+        components.query = nil
+        components.fragment = nil
+        return components.url
+    }
+
+    /// Builds an OpenAI Responses URL from a user-provided base URL.
+    static func responsesURL(from rawBase: String) -> URL? {
+        let trimmed = rawBase.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var components = URLComponents(string: trimmed),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = components.host,
+              !host.isEmpty else {
+            return nil
+        }
+
+        var path = components.path
+        while path.hasSuffix("/") {
+            path.removeLast()
+        }
+
+        for suffix in ["/v1/responses", "/v1"] {
+            if path.hasSuffix(suffix) {
+                path.removeLast(suffix.count)
+                break
+            }
+        }
+
+        components.path = path.isEmpty ? "/v1/responses" : path + "/v1/responses"
+        components.query = nil
+        components.fragment = nil
+        return components.url
+    }
+
     static func isLocalHost(_ url: URL) -> Bool {
         guard let host = url.host?.lowercased() else { return false }
         return host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0"

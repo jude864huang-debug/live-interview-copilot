@@ -3,12 +3,15 @@ import CoreAudio
 import Foundation
 import Observation
 import Security
+import SQLite3
 
 @Observable
 @MainActor
 final class SettingsStore {
     static let defaultInterviewCodexCueModel = "gpt-5.3-codex-spark"
     static let defaultInterviewReferenceAnswerModel = "gpt-5.6-terra"
+    static let defaultInterviewCodexModel = "gpt-5.6-terra"
+    static let interviewCodexModelPresets = ["gpt-5.6-terra", "gpt-5.6-luna"]
     static let defaultInterviewMainAnswerModel = defaultInterviewReferenceAnswerModel
     static let defaultInterviewFallbackAnswerModel = defaultInterviewCodexCueModel
     static let defaultInterviewKnowledgeBriefTokenBudget = 6_000
@@ -744,6 +747,24 @@ final class SettingsStore {
         }
     }
 
+    /// The selected text-generation route belongs to settings, not to a live
+    /// interview engine. Settings windows may exist before that engine does.
+    @ObservationIgnored nonisolated(unsafe) private var _interviewInferencePreference: InterviewInferencePreference
+    var interviewInferencePreference: InterviewInferencePreference {
+        get {
+            access(keyPath: \.interviewInferencePreference)
+            return _interviewInferencePreference
+        }
+        set {
+            withMutation(keyPath: \.interviewInferencePreference) {
+                _interviewInferencePreference = newValue
+                // Keep the established key so existing user selections migrate
+                // without a one-off data conversion.
+                defaults.set(newValue.rawValue, forKey: "copilotInferenceProvider")
+            }
+        }
+    }
+
     @ObservationIgnored nonisolated(unsafe) private var _interviewReferenceAnswerModel: String
     var interviewReferenceAnswerModel: String {
         get {
@@ -763,6 +784,150 @@ final class SettingsStore {
     var interviewMainAnswerModel: String {
         get { interviewReferenceAnswerModel }
         set { interviewReferenceAnswerModel = newValue }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _interviewAPIProtocol: InterviewAPIProtocol
+    var interviewAPIProtocol: InterviewAPIProtocol {
+        get {
+            access(keyPath: \.interviewAPIProtocol)
+            return _interviewAPIProtocol
+        }
+        set {
+            withMutation(keyPath: \.interviewAPIProtocol) {
+                _interviewAPIProtocol = newValue
+                defaults.set(newValue.rawValue, forKey: "interviewAPIProtocol")
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _interviewAPIBaseURL: String
+    var interviewAPIBaseURL: String {
+        get { access(keyPath: \.interviewAPIBaseURL); return _interviewAPIBaseURL }
+        set {
+            withMutation(keyPath: \.interviewAPIBaseURL) {
+                _interviewAPIBaseURL = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                defaults.set(_interviewAPIBaseURL, forKey: "interviewAPIBaseURL")
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _interviewAPIKey: String
+    var interviewAPIKey: String {
+        get {
+            access(keyPath: \.interviewAPIKey)
+            return loadSecretIfNeeded(key: "interviewAPIKey", currentValue: _interviewAPIKey) {
+                _interviewAPIKey = $0
+            }
+        }
+        set {
+            withMutation(keyPath: \.interviewAPIKey) {
+                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                _interviewAPIKey = trimmed
+                markSecretLoaded("interviewAPIKey")
+                secretStore.save(key: "interviewAPIKey", value: trimmed)
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _interviewAPIModel: String
+    var interviewAPIModel: String {
+        get { access(keyPath: \.interviewAPIModel); return _interviewAPIModel }
+        set {
+            withMutation(keyPath: \.interviewAPIModel) {
+                _interviewAPIModel = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                defaults.set(_interviewAPIModel, forKey: "interviewAPIModel")
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _interviewAPIModelOptions: [String]
+    var interviewAPIModelOptions: [String] {
+        get { access(keyPath: \.interviewAPIModelOptions); return _interviewAPIModelOptions }
+        set {
+            withMutation(keyPath: \.interviewAPIModelOptions) {
+                _interviewAPIModelOptions = newValue
+                defaults.set(newValue, forKey: "interviewAPIModelOptions")
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _interviewAPIFastServiceTierEnabled: Bool
+    var interviewAPIFastServiceTierEnabled: Bool {
+        get { access(keyPath: \.interviewAPIFastServiceTierEnabled); return _interviewAPIFastServiceTierEnabled }
+        set {
+            withMutation(keyPath: \.interviewAPIFastServiceTierEnabled) {
+                _interviewAPIFastServiceTierEnabled = newValue
+                defaults.set(newValue, forKey: "interviewAPIFastServiceTierEnabled")
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _interviewAPIProvider: InterviewAPIProvider
+    var interviewAPIProvider: InterviewAPIProvider {
+        get {
+            access(keyPath: \.interviewAPIProvider)
+            return _interviewAPIProvider
+        }
+        set {
+            withMutation(keyPath: \.interviewAPIProvider) {
+                _interviewAPIProvider = newValue
+                defaults.set(newValue.rawValue, forKey: "copilotAPIProvider")
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _deepSeekApiKey: String
+    var deepSeekApiKey: String {
+        get {
+            access(keyPath: \.deepSeekApiKey)
+            return loadSecretIfNeeded(key: "deepSeekApiKey", currentValue: _deepSeekApiKey) {
+                _deepSeekApiKey = $0
+            }
+        }
+        set {
+            withMutation(keyPath: \.deepSeekApiKey) {
+                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                _deepSeekApiKey = trimmed
+                markSecretLoaded("deepSeekApiKey")
+                secretStore.save(key: "deepSeekApiKey", value: trimmed)
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _deepSeekBaseURL: String
+    var deepSeekBaseURL: String {
+        get { access(keyPath: \.deepSeekBaseURL); return _deepSeekBaseURL }
+        set {
+            withMutation(keyPath: \.deepSeekBaseURL) {
+                _deepSeekBaseURL = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                defaults.set(_deepSeekBaseURL, forKey: "deepSeekBaseURL")
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _interviewDeepSeekModel: String
+    var interviewDeepSeekModel: String {
+        get { access(keyPath: \.interviewDeepSeekModel); return _interviewDeepSeekModel }
+        set {
+            withMutation(keyPath: \.interviewDeepSeekModel) {
+                _interviewDeepSeekModel = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                defaults.set(_interviewDeepSeekModel, forKey: "interviewDeepSeekModel")
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _interviewCodexModel: String
+    var interviewCodexModel: String {
+        get {
+            access(keyPath: \.interviewCodexModel)
+            return _interviewCodexModel
+        }
+        set {
+            withMutation(keyPath: \.interviewCodexModel) {
+                _interviewCodexModel = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                defaults.set(_interviewCodexModel, forKey: "interviewCodexModel")
+            }
+        }
     }
 
     @ObservationIgnored nonisolated(unsafe) private var _interviewIncludeCandidateAnswersInContext: Bool
@@ -836,6 +1001,20 @@ final class SettingsStore {
             withMutation(keyPath: \.interviewAnswerDepth) {
                 _interviewAnswerDepth = newValue
                 defaults.set(newValue.rawValue, forKey: "interviewAnswerDepth")
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _interviewCodexReasoningEffort: InterviewReasoningEffort
+    var interviewCodexReasoningEffort: InterviewReasoningEffort {
+        get {
+            access(keyPath: \.interviewCodexReasoningEffort)
+            return _interviewCodexReasoningEffort
+        }
+        set {
+            withMutation(keyPath: \.interviewCodexReasoningEffort) {
+                _interviewCodexReasoningEffort = newValue
+                defaults.set(newValue.rawValue, forKey: "interviewCodexReasoningEffort")
             }
         }
     }
@@ -1717,7 +1896,12 @@ final class SettingsStore {
         if storage.runMigrations {
             Self.migrateFromOldBundleIfNeeded(defaults: defaults)
             Self.migrateFromOpenGranolaIfNeeded(defaults: defaults)
+            Self.migrateFromOpenOatsIfNeeded(defaults: defaults)
             Self.migrateKeychainServiceIfNeeded(defaults: defaults)
+            Self.migrateNotesDirectoryToCurrentDefaultIfNeeded(
+                defaults: defaults,
+                defaultDirectory: storage.defaultNotesDirectory
+            )
         }
 
         // Migrate renamed settings keys (old -> new)
@@ -1814,11 +1998,46 @@ final class SettingsStore {
         } else {
             self._interviewAutoReferenceAnswerEnabled = defaults.bool(forKey: "interviewAutoReferenceAnswerEnabled")
         }
+        let storedInferencePreference = InterviewInferencePreference(
+            rawValue: defaults.string(forKey: "copilotInferenceProvider") ?? ""
+        )
+        self._interviewInferencePreference = storedInferencePreference == .codexOnly
+            ? .codexOnly
+            : .apiPreferred
         let storedReferenceAnswerModel = defaults.string(forKey: "interviewReferenceAnswerModel")?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         self._interviewReferenceAnswerModel = storedReferenceAnswerModel.isEmpty
             ? Self.defaultInterviewReferenceAnswerModel
             : storedReferenceAnswerModel
+        let storedAPIProtocol = InterviewAPIProtocol(
+            rawValue: defaults.string(forKey: "interviewAPIProtocol") ?? ""
+        ) ?? .chatCompletion
+        self._interviewAPIProtocol = storedAPIProtocol
+        self._interviewAPIBaseURL = defaults.string(forKey: "interviewAPIBaseURL") ?? (
+            storedAPIProtocol == .chatCompletion
+                ? "https://api.deepseek.com"
+                : "https://api.openai.com"
+        )
+        self._interviewAPIKey = ""
+        self._interviewAPIModel = defaults.string(forKey: "interviewAPIModel") ?? (
+            storedAPIProtocol == .chatCompletion
+                ? "deepseek-chat"
+                : Self.defaultInterviewMainAnswerModel
+        )
+        self._interviewAPIModelOptions = defaults.stringArray(forKey: "interviewAPIModelOptions") ?? []
+        self._interviewAPIFastServiceTierEnabled = defaults.bool(forKey: "interviewAPIFastServiceTierEnabled")
+        self._interviewAPIProvider = InterviewAPIProvider(
+            rawValue: defaults.string(forKey: "copilotAPIProvider") ?? ""
+        ) ?? .openAI
+        self._deepSeekApiKey = ""
+        self._deepSeekBaseURL = defaults.string(forKey: "deepSeekBaseURL") ?? "https://api.deepseek.com"
+        self._interviewDeepSeekModel = defaults.string(forKey: "interviewDeepSeekModel") ?? "deepseek-chat"
+        let storedCodexModel = defaults.string(forKey: "interviewCodexModel")?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let legacyCodexModel = Self.interviewCodexModelPresets.contains(storedReferenceAnswerModel)
+            ? storedReferenceAnswerModel
+            : Self.defaultInterviewCodexModel
+        self._interviewCodexModel = storedCodexModel.isEmpty ? legacyCodexModel : storedCodexModel
         if defaults.object(forKey: "interviewIncludeCandidateAnswersInContext") == nil {
             self._interviewIncludeCandidateAnswersInContext = false
         } else {
@@ -1833,8 +2052,10 @@ final class SettingsStore {
         }
         let storedCodexCueModel = defaults.string(forKey: "interviewCodexCueModel")?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let storedInferencePreferenceRaw = defaults.string(forKey: "copilotInferenceProvider") ?? ""
+        let isAPIPreferred = storedInferencePreferenceRaw != InterviewInferencePreference.codexOnly.rawValue
         self._interviewCodexCueModel = storedCodexCueModel.isEmpty
-            ? Self.defaultInterviewCodexCueModel
+            ? (isAPIPreferred ? "" : Self.defaultInterviewCodexCueModel)
             : storedCodexCueModel
         if defaults.object(forKey: "interviewDelayedFallbackEnabled") == nil {
             self._interviewDelayedFallbackEnabled = true
@@ -1844,6 +2065,9 @@ final class SettingsStore {
         self._interviewAnswerDepth = InterviewAnswerDepth(
             rawValue: defaults.string(forKey: "interviewAnswerDepth") ?? ""
         ) ?? .standard
+        self._interviewCodexReasoningEffort = InterviewReasoningEffort(
+            rawValue: defaults.string(forKey: "interviewCodexReasoningEffort") ?? ""
+        ) ?? .low
         if defaults.object(forKey: "interviewKnowledgeBriefTokenBudget") == nil {
             self._interviewKnowledgeBriefTokenBudget = Self.defaultInterviewKnowledgeBriefTokenBudget
         } else {
@@ -2380,6 +2604,364 @@ final class SettingsStore {
 // MARK: - Migration
 
 extension SettingsStore {
+    /// Migrate settings, credentials, and local history from the locally
+    /// shipped OpenOats bundle. The application was renamed, so this must merge
+    /// data rather than assume the destination directory is empty.
+    private static func migrateFromOpenOatsIfNeeded(defaults: UserDefaults) {
+        let migrationKey = "didMigrateFromOpenOatsToLiveInterviewCopilot"
+        guard !defaults.bool(forKey: migrationKey) else { return }
+        var migrationSucceeded = true
+
+        let oldBundleID = "com.openoats.app"
+        if let oldDefaults = UserDefaults(suiteName: oldBundleID),
+           let domain = oldDefaults.persistentDomain(forName: oldBundleID) {
+            for (key, value) in domain where !key.hasPrefix("didMigrate") {
+                if defaults.object(forKey: key) == nil {
+                    defaults.set(value, forKey: key)
+                }
+            }
+        }
+
+        let keychainMappings = [
+            (source: "openRouterApiKey", destination: "openRouterApiKey"),
+            (source: "requestyApiKey", destination: "requestyApiKey"),
+            // The interview route was renamed from the legacy OpenAI setting.
+            // Keep the old setting for existing screens and also populate the
+            // new route key used by CustomerCopilotEngine.
+            (source: "openAIApiKey", destination: "openAIApiKey"),
+            (source: "openAIApiKey", destination: "interviewAPIKey"),
+            (source: "deepSeekApiKey", destination: "deepSeekApiKey"),
+            (source: "anthropicApiKey", destination: "anthropicApiKey"),
+            (source: "assemblyAIApiKey", destination: "assemblyAIApiKey"),
+            (source: "elevenLabsApiKey", destination: "elevenLabsApiKey"),
+            (source: "cohereApiKey", destination: "cohereApiKey"),
+            (source: "lmStudioApiKey", destination: "lmStudioApiKey"),
+            (source: "openAILLMApiKey", destination: "openAILLMApiKey"),
+            (source: "openAIEmbedApiKey", destination: "openAIEmbedApiKey"),
+            (source: "voyageApiKey", destination: "voyageApiKey"),
+            (source: "tencentASRSecretID", destination: "tencentASRSecretID"),
+            (source: "tencentASRSecretKey", destination: "tencentASRSecretKey"),
+            (source: "granolaApiKey", destination: "granolaApiKey"),
+            (source: "webhookSecret", destination: "webhookSecret"),
+        ]
+        for mapping in keychainMappings {
+            if let oldValue = loadKeychain(service: oldBundleID, key: mapping.source) {
+                migrationSucceeded = KeychainHelper.saveIfMissing(
+                    key: mapping.destination,
+                    value: oldValue
+                ) && migrationSucceeded
+            }
+        }
+
+        migrationSucceeded = migrateFilesFromOpenOats() && migrationSucceeded
+        if migrationSucceeded {
+            defaults.set(true, forKey: migrationKey)
+        } else {
+            Log.sessionRepository.warning(
+                "OpenOats migration is incomplete; retaining retry state for the next launch."
+            )
+        }
+    }
+
+    private static func migrateFilesFromOpenOats() -> Bool {
+        let fileManager = FileManager.default
+        let applicationSupport = fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first!
+        let sourceDirectory = applicationSupport.appendingPathComponent("OpenOats", isDirectory: true)
+        let destinationDirectory = applicationSupport.appendingPathComponent(
+            "Live Interview Copilot",
+            isDirectory: true
+        )
+        guard fileManager.fileExists(atPath: sourceDirectory.path) else { return true }
+
+        do {
+            try fileManager.createDirectory(at: destinationDirectory, withIntermediateDirectories: true)
+        } catch {
+            Log.sessionRepository.error(
+                "Failed to create OpenOats migration directory: \(error, privacy: .public)"
+            )
+            return false
+        }
+
+        var migrationSucceeded = mergeDirectoryContents(
+            from: sourceDirectory.appendingPathComponent("sessions", isDirectory: true),
+            into: destinationDirectory.appendingPathComponent("sessions", isDirectory: true),
+            fileManager: fileManager
+        )
+
+        migrationSucceeded = mergeTemplatesJSON(
+            from: sourceDirectory.appendingPathComponent("templates.json"),
+            into: destinationDirectory.appendingPathComponent("templates.json"),
+            fileManager: fileManager
+        ) && migrationSucceeded
+        migrationSucceeded = mergeKBCacheJSON(
+            from: sourceDirectory.appendingPathComponent("kb_cache.json"),
+            into: destinationDirectory.appendingPathComponent("kb_cache.json"),
+            fileManager: fileManager
+        ) && migrationSucceeded
+
+        let sourceCopilotDirectory = sourceDirectory.appendingPathComponent("copilot", isDirectory: true)
+        let destinationCopilotDirectory = destinationDirectory.appendingPathComponent("copilot", isDirectory: true)
+        do {
+            try fileManager.createDirectory(at: destinationCopilotDirectory, withIntermediateDirectories: true)
+        } catch {
+            Log.sessionRepository.error(
+                "Failed to create OpenOats copilot migration directory: \(error, privacy: .public)"
+            )
+            migrationSucceeded = false
+        }
+        migrationSucceeded = mergeKnowledgeSourceMapJSON(
+            from: sourceCopilotDirectory.appendingPathComponent("knowledge-source-map.json"),
+            into: destinationCopilotDirectory.appendingPathComponent("knowledge-source-map.json"),
+            fileManager: fileManager
+        ) && migrationSucceeded
+        migrationSucceeded = mergeKnowledgePackageJSON(
+            from: sourceCopilotDirectory.appendingPathComponent("knowledge-package.json"),
+            into: destinationCopilotDirectory.appendingPathComponent("knowledge-package.json"),
+            fileManager: fileManager
+        ) && migrationSucceeded
+        migrationSucceeded = mergeCopilotHistory(
+            from: sourceCopilotDirectory.appendingPathComponent("history.sqlite"),
+            into: destinationCopilotDirectory.appendingPathComponent("history.sqlite")
+        ) && migrationSucceeded
+        return migrationSucceeded
+    }
+
+    private static func mergeDirectoryContents(
+        from sourceDirectory: URL,
+        into destinationDirectory: URL,
+        fileManager: FileManager
+    ) -> Bool {
+        guard fileManager.fileExists(atPath: sourceDirectory.path) else { return true }
+        do {
+            try fileManager.createDirectory(at: destinationDirectory, withIntermediateDirectories: true)
+        } catch {
+            Log.sessionRepository.error(
+                "Failed to create migrated sessions directory: \(error, privacy: .public)"
+            )
+            return false
+        }
+        guard let items = try? fileManager.contentsOfDirectory(
+            at: sourceDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return false }
+
+        var migrationSucceeded = true
+        for item in items {
+            let destination = destinationDirectory.appendingPathComponent(item.lastPathComponent)
+            if fileManager.fileExists(atPath: destination.path) {
+                // Session IDs are stable file names; an existing destination
+                // already contains that record, so keep it and continue.
+                continue
+            }
+            migrationSucceeded = moveItemIfMissing(
+                from: item,
+                to: destination,
+                fileManager: fileManager
+            ) && migrationSucceeded
+        }
+        return migrationSucceeded
+    }
+
+    private static func moveItemIfMissing(from source: URL, to destination: URL, fileManager: FileManager) -> Bool {
+        guard fileManager.fileExists(atPath: source.path) else { return true }
+        guard !fileManager.fileExists(atPath: destination.path) else {
+            Log.sessionRepository.warning(
+                "OpenOats migration deferred because destination already exists: \(destination.lastPathComponent, privacy: .public)"
+            )
+            return false
+        }
+        do {
+            try fileManager.moveItem(at: source, to: destination)
+            return true
+        } catch {
+            Log.sessionRepository.error(
+                "Failed to migrate OpenOats item \(source.lastPathComponent, privacy: .public): \(error, privacy: .public)"
+            )
+            return false
+        }
+    }
+
+    private static func mergeTemplatesJSON(from source: URL, into destination: URL, fileManager: FileManager) -> Bool {
+        mergeJSONFile(from: source, into: destination, fileManager: fileManager) { destinationObject, sourceObject in
+            guard let sourceTemplates = sourceObject["templates"] as? [[String: Any]] else { return false }
+            if let existing = destinationObject["templates"], existing as? [[String: Any]] == nil {
+                return false
+            }
+            var destinationTemplates = destinationObject["templates"] as? [[String: Any]] ?? []
+            var existingIDs = Set(destinationTemplates.compactMap { $0["id"] as? String })
+            for template in sourceTemplates {
+                guard let id = template["id"] as? String, !id.isEmpty else { continue }
+                if existingIDs.insert(id).inserted {
+                    destinationTemplates.append(template)
+                }
+            }
+            destinationObject["templates"] = destinationTemplates
+            if destinationObject["version"] == nil {
+                destinationObject["version"] = sourceObject["version"]
+            }
+            return true
+        }
+    }
+
+    private static func mergeKBCacheJSON(from source: URL, into destination: URL, fileManager: FileManager) -> Bool {
+        mergeJSONFile(from: source, into: destination, fileManager: fileManager) { destinationObject, sourceObject in
+            guard let sourceEntries = sourceObject["entries"] as? [String: Any] else { return false }
+            if let existing = destinationObject["entries"], existing as? [String: Any] == nil {
+                return false
+            }
+            var destinationEntries = destinationObject["entries"] as? [String: Any] ?? [:]
+            for (key, value) in sourceEntries where destinationEntries[key] == nil {
+                destinationEntries[key] = value
+            }
+            destinationObject["entries"] = destinationEntries
+            if destinationObject["embeddingConfigFingerprint"] == nil {
+                destinationObject["embeddingConfigFingerprint"] = sourceObject["embeddingConfigFingerprint"]
+            }
+            if destinationObject["folderPath"] == nil {
+                destinationObject["folderPath"] = sourceObject["folderPath"]
+            }
+            return true
+        }
+    }
+
+    private static func mergeKnowledgeSourceMapJSON(
+        from source: URL,
+        into destination: URL,
+        fileManager: FileManager
+    ) -> Bool {
+        mergeJSONFile(from: source, into: destination, fileManager: fileManager) { destinationObject, sourceObject in
+            for (key, value) in sourceObject where destinationObject[key] == nil {
+                destinationObject[key] = value
+            }
+            return true
+        }
+    }
+
+    private static func mergeKnowledgePackageJSON(
+        from source: URL,
+        into destination: URL,
+        fileManager: FileManager
+    ) -> Bool {
+        mergeJSONFile(from: source, into: destination, fileManager: fileManager) { destinationObject, sourceObject in
+            guard mergeIdentifiedJSONArray(key: "sources", destination: &destinationObject, source: sourceObject),
+                  mergeIdentifiedJSONArray(key: "blocks", destination: &destinationObject, source: sourceObject)
+            else { return false }
+
+            if let sourceFailures = sourceObject["failedFiles"] as? [String] {
+                if let existing = destinationObject["failedFiles"], existing as? [String] == nil {
+                    return false
+                }
+                var destinationFailures = destinationObject["failedFiles"] as? [String] ?? []
+                for failure in sourceFailures where !destinationFailures.contains(failure) {
+                    destinationFailures.append(failure)
+                }
+                destinationObject["failedFiles"] = destinationFailures
+            }
+            return true
+        }
+    }
+
+    private static func mergeIdentifiedJSONArray(
+        key: String,
+        destination: inout [String: Any],
+        source: [String: Any]
+    ) -> Bool {
+        guard let sourceItems = source[key] as? [[String: Any]] else {
+            return source[key] == nil
+        }
+        if let existing = destination[key], existing as? [[String: Any]] == nil {
+            return false
+        }
+        var destinationItems = destination[key] as? [[String: Any]] ?? []
+        var existingIDs = Set(destinationItems.compactMap { $0["id"] as? String })
+        for item in sourceItems {
+            guard let id = item["id"] as? String, !id.isEmpty else { continue }
+            if existingIDs.insert(id).inserted {
+                destinationItems.append(item)
+            }
+        }
+        destination[key] = destinationItems
+        return true
+    }
+
+    private static func mergeJSONFile(
+        from source: URL,
+        into destination: URL,
+        fileManager: FileManager,
+        merge: (inout [String: Any], [String: Any]) -> Bool
+    ) -> Bool {
+        guard fileManager.fileExists(atPath: source.path) else { return true }
+        guard fileManager.fileExists(atPath: destination.path) else {
+            return moveItemIfMissing(from: source, to: destination, fileManager: fileManager)
+        }
+        guard let sourceObject = readJSONObject(at: source),
+              var destinationObject = readJSONObject(at: destination),
+              merge(&destinationObject, sourceObject) else {
+            Log.sessionRepository.warning(
+                "OpenOats JSON migration deferred because a file could not be merged: \(source.lastPathComponent, privacy: .public)"
+            )
+            return false
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: destinationObject, options: [.sortedKeys]) else {
+            return false
+        }
+        do {
+            try data.write(to: destination, options: .atomic)
+            return true
+        } catch {
+            Log.sessionRepository.error(
+                "Failed to write merged OpenOats JSON \(destination.lastPathComponent, privacy: .public): \(error, privacy: .public)"
+            )
+            return false
+        }
+    }
+
+    private static func readJSONObject(at url: URL) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: url),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let dictionary = object as? [String: Any] else {
+            return nil
+        }
+        return dictionary
+    }
+
+    private static func mergeCopilotHistory(from sourceDatabase: URL, into destinationDatabase: URL) -> Bool {
+        guard FileManager.default.fileExists(atPath: sourceDatabase.path) else { return true }
+
+        var database: OpaquePointer?
+        guard sqlite3_open(destinationDatabase.path, &database) == SQLITE_OK, let database else {
+            return false
+        }
+        defer { sqlite3_close(database) }
+
+        guard sqlite3_exec(database, """
+            CREATE TABLE IF NOT EXISTS copilot_history (
+                id TEXT PRIMARY KEY,
+                created_at REAL NOT NULL,
+                question TEXT NOT NULL,
+                payload BLOB NOT NULL
+            );
+            """, nil, nil, nil) == SQLITE_OK else {
+            return false
+        }
+
+        let escapedSourcePath = sourceDatabase.path.replacingOccurrences(of: "'", with: "''")
+        guard sqlite3_exec(database, "ATTACH DATABASE '\(escapedSourcePath)' AS openoats_legacy", nil, nil, nil) == SQLITE_OK else {
+            return false
+        }
+        defer { sqlite3_exec(database, "DETACH DATABASE openoats_legacy", nil, nil, nil) }
+
+        return sqlite3_exec(database, """
+            INSERT OR IGNORE INTO copilot_history(id, created_at, question, payload)
+            SELECT id, created_at, question, payload FROM openoats_legacy.copilot_history;
+            """, nil, nil, nil)
+            == SQLITE_OK
+    }
+
     /// Migrate settings from the old "On The Spot" (com.onthespot.app) bundle.
     /// Copies UserDefaults and Keychain entries to the current bundle, then marks migration as done.
     private static func migrateFromOldBundleIfNeeded(defaults: UserDefaults) {
@@ -2511,6 +3093,34 @@ extension SettingsStore {
 
     /// Migrate keychain entries from the old "com.opengranola.app" service to the
     /// current "com.jude864huang.liveinterviewcopilot.app" service.
+    /// Renames the original export folder to the user-facing app name without
+    /// touching it when a destination already exists. The canonical session
+    /// store remains in Application Support; this only moves user-visible
+    /// transcript and note exports.
+    private static func migrateNotesDirectoryToCurrentDefaultIfNeeded(
+        defaults: UserDefaults,
+        defaultDirectory: URL
+    ) {
+        let fileManager = FileManager.default
+        let legacyDirectory = fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent("Documents/LiveInterviewCopilot", isDirectory: true)
+
+        let configuredDirectory = defaults.string(forKey: "notesFolderPath")
+        guard legacyDirectory.standardizedFileURL != defaultDirectory.standardizedFileURL,
+              configuredDirectory == nil || configuredDirectory == legacyDirectory.path,
+              fileManager.fileExists(atPath: legacyDirectory.path),
+              !fileManager.fileExists(atPath: defaultDirectory.path) else {
+            return
+        }
+
+        do {
+            try fileManager.moveItem(at: legacyDirectory, to: defaultDirectory)
+            defaults.set(defaultDirectory.path, forKey: "notesFolderPath")
+        } catch {
+            Log.sessionRepository.error("Failed to migrate notes directory: \(error, privacy: .public)")
+        }
+    }
+
     private static func migrateKeychainServiceIfNeeded(defaults: UserDefaults) {
         let migrationKey = "didMigrateKeychainToLiveInterviewCopilot"
         guard !defaults.bool(forKey: migrationKey) else { return }

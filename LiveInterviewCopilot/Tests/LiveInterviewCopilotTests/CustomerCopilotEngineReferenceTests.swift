@@ -4,6 +4,8 @@ import XCTest
 
 @MainActor
 final class CustomerCopilotEngineReferenceTests: XCTestCase {
+    private static let apiFallbackModel = "api-fallback-model"
+
     func testTerraProducesTheOnlyVisibleProgressiveAnswer() async {
         let terra = ProgressiveProvider(behavior: .success(marker: "Terra", delayMilliseconds: 10))
         let spark = ProgressiveProvider(behavior: .success(marker: "Spark", delayMilliseconds: 0))
@@ -24,39 +26,85 @@ final class CustomerCopilotEngineReferenceTests: XCTestCase {
         XCTAssertEqual(harness.engine.progressiveAnswer?.segments.count, 3)
     }
 
-    func testTerraFailureStartsSparkImmediatelyAndSparkOwnsTheRound() async {
-        let terra = ProgressiveProvider(behavior: .failure(.serverUnavailable(503)))
-        let spark = ProgressiveProvider(behavior: .success(marker: "Spark", delayMilliseconds: 10))
-        let harness = makeHarness(api: terra, codex: spark)
+    func testAPIFailureUsesSameProtocolFallbackAndLocksTheRound() async {
+        let terra = ProgressiveProvider(
+            behavior: .failure(.serverUnavailable(503)),
+            fallbackModel: Self.apiFallbackModel,
+            fallbackBehavior: .success(marker: "API fallback", delayMilliseconds: 10)
+        )
+        let codex = ProgressiveProvider(behavior: .failure(.invalidResponse))
+        let harness = makeHarness(api: terra, codex: codex)
+        harness.settings.interviewFallbackAnswerModel = Self.apiFallbackModel
 
         submitQuestion("资源减半时怎么取舍？", to: harness)
 
         let didFinish = await waitUntil { harness.engine.progressiveAnswer != nil }
         let terraRequestCount = await terra.requestCount()
-        let sparkRequestCount = await spark.requestCount()
+        let codexRequestCount = await codex.requestCount()
         XCTAssertTrue(didFinish)
         XCTAssertTrue(harness.engine.answerFallbackTriggered)
-        XCTAssertEqual(harness.engine.answerOwnerModel, SettingsStore.defaultInterviewFallbackAnswerModel)
-        XCTAssertEqual(harness.engine.progressiveAnswer?.entry.text, "Spark：我会先统一目标，再按影响和证据排序。")
-        XCTAssertEqual(terraRequestCount, 1)
-        XCTAssertEqual(sparkRequestCount, 1)
+        XCTAssertEqual(harness.engine.answerOwnerModel, Self.apiFallbackModel)
+        XCTAssertEqual(harness.engine.progressiveAnswer?.entry.text, "API fallback：我会先统一目标，再按影响和证据排序。")
+        XCTAssertEqual(terraRequestCount, 2)
+        XCTAssertEqual(codexRequestCount, 0)
         XCTAssertEqual(harness.engine.runDiagnostics.attemptedModels, [
             SettingsStore.defaultInterviewMainAnswerModel,
-            SettingsStore.defaultInterviewFallbackAnswerModel,
+            Self.apiFallbackModel,
         ])
 
         submitQuestion("下一题：你会如何验证取舍结果？", to: harness)
         let didFinishNext = await waitUntil {
-            await spark.requestCount() == 2
-                && harness.engine.progressiveAnswer?.entry.text.hasPrefix("Spark：") == true
+            await terra.requestCount() == 3
+                && harness.engine.progressiveAnswer?.entry.text.hasPrefix("API fallback：") == true
         }
         let terraRequestCountAfterNextQuestion = await terra.requestCount()
         XCTAssertTrue(didFinishNext)
-        XCTAssertEqual(terraRequestCountAfterNextQuestion, 1)
-        XCTAssertEqual(harness.engine.runDiagnostics.mainModel, SettingsStore.defaultInterviewFallbackAnswerModel)
-        XCTAssertEqual(harness.engine.runDiagnostics.ownerModel, SettingsStore.defaultInterviewFallbackAnswerModel)
-        XCTAssertEqual(harness.engine.runDiagnostics.attemptedModels, [SettingsStore.defaultInterviewFallbackAnswerModel])
+        XCTAssertEqual(terraRequestCountAfterNextQuestion, 3)
+        XCTAssertEqual(harness.engine.runDiagnostics.mainModel, Self.apiFallbackModel)
+        XCTAssertEqual(harness.engine.runDiagnostics.ownerModel, Self.apiFallbackModel)
+        XCTAssertEqual(harness.engine.runDiagnostics.attemptedModels, [Self.apiFallbackModel])
         XCTAssertTrue(harness.engine.isUsingFallbackAnswerModelForSession)
+    }
+
+    func testCodexCLIUsesTheConfiguredMainModelAndReasoning() async {
+        let api = ProgressiveProvider(behavior: .failure(.invalidResponse))
+        let codex = ProgressiveProvider(behavior: .success(marker: "Luna", delayMilliseconds: 10))
+        let harness = makeHarness(api: api, codex: codex)
+        harness.settings.interviewCodexModel = "gpt-5.6-luna"
+        harness.settings.interviewCodexReasoningEffort = .high
+        harness.engine.inferencePreference = .codexOnly
+
+        submitQuestion("如何判断产品优先级？", to: harness)
+
+        let didFinish = await waitUntil { harness.engine.progressiveAnswer != nil }
+        XCTAssertTrue(didFinish)
+        XCTAssertEqual(harness.engine.answerOwnerModel, "gpt-5.6-luna")
+        XCTAssertEqual(harness.engine.primaryAnswerModel, "gpt-5.6-luna")
+        XCTAssertEqual(harness.engine.activeAnswerModel, "gpt-5.6-luna")
+        XCTAssertEqual(
+            harness.engine.runDiagnostics.provider?.rawValue,
+            InterviewProvider.codexSubscription.rawValue
+        )
+        XCTAssertEqual(harness.engine.runDiagnostics.reasoningEffort, .high)
+        let apiRequestCount = await api.requestCount()
+        let codexRequestCount = await codex.requestCount()
+        XCTAssertEqual(apiRequestCount, 0)
+        XCTAssertEqual(codexRequestCount, 1)
+    }
+
+    func testRequestBoundaryUsesTheLatestPersistedGenerationRoute() async {
+        let api = ProgressiveProvider(behavior: .success(marker: "API", delayMilliseconds: 10))
+        let codex = ProgressiveProvider(behavior: .success(marker: "Codex", delayMilliseconds: 10))
+        let harness = makeHarness(api: api, codex: codex)
+        harness.settings.interviewInferencePreference = .codexOnly
+
+        submitQuestion("如何判断产品优先级？", to: harness)
+
+        let didFinish = await waitUntil { harness.engine.progressiveAnswer != nil }
+        XCTAssertTrue(didFinish)
+        XCTAssertEqual(harness.engine.answerOwnerModel, SettingsStore.defaultInterviewCodexModel)
+        XCTAssertEqual(await api.requestCount(), 0)
+        XCTAssertEqual(await codex.requestCount(), 1)
     }
 
     func testInvalidCandidateFactNeverEntersVisibleProgress() async {
@@ -90,6 +138,63 @@ final class CustomerCopilotEngineReferenceTests: XCTestCase {
         let requestCount = await terra.requestCount()
         XCTAssertTrue(didFinishSecondAnswer)
         XCTAssertEqual(requestCount, 2)
+    }
+
+    func testAPIFallbackFailureUnlocksOriginalModelForRetry() async {
+        let terra = ProgressiveProvider(
+            behavior: .failure(.serverUnavailable(503)),
+            fallbackModel: Self.apiFallbackModel,
+            fallbackBehavior: .failure(.serverUnavailable(503))
+        )
+        let codex = ProgressiveProvider(behavior: .failure(.serverUnavailable(503)))
+        let harness = makeHarness(api: terra, codex: codex)
+        harness.settings.interviewFallbackAnswerModel = Self.apiFallbackModel
+
+        submitQuestion("资源减半时怎么取舍？", to: harness)
+        let didFail = await waitUntil { harness.engine.referenceGenerationState == .failed }
+        let terraRequestCount = await terra.requestCount()
+        let codexRequestCount = await codex.requestCount()
+        XCTAssertTrue(didFail)
+        XCTAssertEqual(terraRequestCount, 2)
+        XCTAssertEqual(codexRequestCount, 0)
+        XCTAssertTrue(harness.engine.answerFallbackTriggered)
+        // Spark also failed before a visible entry, so unlock the original model.
+        XCTAssertFalse(harness.engine.isUsingFallbackAnswerModelForSession)
+        XCTAssertEqual(harness.engine.activeAnswerModel, SettingsStore.defaultInterviewMainAnswerModel)
+
+        // A later regenerate should attempt the original primary model again.
+        harness.engine.regenerateCurrentAnswer()
+        let didRetryPrimary = await waitUntil { await terra.requestCount() >= 3 }
+        XCTAssertTrue(didRetryPrimary)
+        let terraRequestCountAfterRetry = await terra.requestCount()
+        let codexRequestCountAfterRetry = await codex.requestCount()
+        XCTAssertGreaterThanOrEqual(terraRequestCountAfterRetry, 3)
+        XCTAssertEqual(codexRequestCountAfterRetry, 0)
+    }
+
+    func testRegenerateWithThinkingDepthUpdatesSettingsAndRetries() async {
+        let terra = ProgressiveProvider(behavior: .success(marker: "Terra", delayMilliseconds: 10))
+        let harness = makeHarness(api: terra, codex: ProgressiveProvider(behavior: .failure(.invalidResponse)))
+        harness.settings.interviewCodexReasoningEffort = .low
+        harness.settings.interviewAnswerDepth = .standard
+
+        submitQuestion("如何判断产品优先级？", to: harness)
+        let didFinishFirstAnswer = await waitUntil { harness.engine.progressiveAnswer != nil }
+        XCTAssertTrue(didFinishFirstAnswer)
+
+        harness.engine.regenerateCurrentAnswer(reasoningEffort: .high)
+
+        let didFinishSecondAnswer = await waitUntil {
+            await terra.requestCount() == 2 && harness.engine.progressiveAnswer != nil
+        }
+        XCTAssertTrue(didFinishSecondAnswer)
+        XCTAssertEqual(harness.settings.interviewCodexReasoningEffort, .high)
+        XCTAssertEqual(harness.settings.interviewAnswerDepth, .deep)
+        XCTAssertEqual(harness.engine.selectedThinkingDepth, .medium)
+        let lastEffort = await terra.latestReasoningEffort()
+        // API requests follow the API answer-depth picker. `.deep` maps to
+        // medium reasoning effort; the Codex-only setting remains `.high`.
+        XCTAssertEqual(lastEffort, .medium)
     }
 
     func testPromptContainsVersionedContractAndDoesNotAnchorToFastCue() async {
@@ -575,6 +680,8 @@ final class CustomerCopilotEngineReferenceTests: XCTestCase {
         ))
         settings.interviewDelayedFallbackEnabled = true
         settings.interviewAnswerDepth = .standard
+        settings.interviewAPIProtocol = .responses
+        settings.interviewAPIModel = SettingsStore.defaultInterviewMainAnswerModel
         settings.interviewIncludeCandidateAnswersInContext = false
 
         let transcriptStore = TranscriptStore()
@@ -598,6 +705,7 @@ final class CustomerCopilotEngineReferenceTests: XCTestCase {
         return Harness(
             engine: engine,
             transcriptStore: transcriptStore,
+            settings: settings,
             savedAnswers: savedAnswers
         )
     }
@@ -628,6 +736,7 @@ final class CustomerCopilotEngineReferenceTests: XCTestCase {
     private struct Harness {
         let engine: CustomerCopilotEngine
         let transcriptStore: TranscriptStore
+        let settings: SettingsStore
         let savedAnswers: InterviewAnswerCapture
     }
 }
@@ -653,6 +762,8 @@ private actor ProgressiveProvider: InterviewGenerationProvider {
     }
 
     private let behavior: Behavior
+    private let fallbackModel: String?
+    private let fallbackBehavior: Behavior?
     private let supportsFollowUps: Bool
     private let followUpSuggestionCount: Int
     private let failingFollowUpAnswerIndices: Set<Int>
@@ -660,6 +771,7 @@ private actor ProgressiveProvider: InterviewGenerationProvider {
     private let ignoreFollowUpAnswerCancellation: Bool
     private var requests = 0
     private var prompts: [String] = []
+    private var reasoningEfforts: [InterviewReasoningEffort] = []
     private var followUpAnswerAttemptsByIndex: [Int: Int] = [:]
     private var activeFollowUpAnswerRequests = 0
     private var maximumActiveFollowUpAnswerRequests = 0
@@ -667,6 +779,8 @@ private actor ProgressiveProvider: InterviewGenerationProvider {
 
     init(
         behavior: Behavior,
+        fallbackModel: String? = nil,
+        fallbackBehavior: Behavior? = nil,
         supportsFollowUps: Bool = false,
         followUpSuggestionCount: Int = 3,
         failingFollowUpAnswerIndices: Set<Int> = [],
@@ -674,6 +788,8 @@ private actor ProgressiveProvider: InterviewGenerationProvider {
         ignoreFollowUpAnswerCancellation: Bool = false
     ) {
         self.behavior = behavior
+        self.fallbackModel = fallbackModel
+        self.fallbackBehavior = fallbackBehavior
         self.supportsFollowUps = supportsFollowUps
         self.followUpSuggestionCount = followUpSuggestionCount
         self.failingFollowUpAnswerIndices = failingFollowUpAnswerIndices
@@ -695,7 +811,11 @@ private actor ProgressiveProvider: InterviewGenerationProvider {
     ) async throws -> InterviewProgressiveAnswer {
         requests += 1
         prompts.append(request.prompt)
-        switch behavior {
+        reasoningEfforts.append(request.reasoningEffort)
+        let selectedBehavior = request.model == fallbackModel
+            ? (fallbackBehavior ?? behavior)
+            : behavior
+        switch selectedBehavior {
         case .failure(let error):
             throw error
         case .entryThenFailure(let marker):
@@ -796,6 +916,7 @@ private actor ProgressiveProvider: InterviewGenerationProvider {
 
     func requestCount() -> Int { requests }
     func latestPrompt() -> String { prompts.last ?? "" }
+    func latestReasoningEffort() -> InterviewReasoningEffort? { reasoningEfforts.last }
     func maximumFollowUpAnswerConcurrency() -> Int { maximumActiveFollowUpAnswerRequests }
     func followUpEvents() -> [String] { recordedFollowUpEvents }
 

@@ -115,6 +115,21 @@ extension InterviewGenerationProvider {
 }
 
 actor OpenAIResponsesProvider: InterviewGenerationProvider {
+    /// Third-party Responses implementations frequently accept `json_object`
+    /// but do not reliably finish a large nested object. Keep their contract
+    /// small: establish the answer skeleton first, then fill each point.
+    private struct CompatibilityAnswerSkeleton: Codable, Sendable {
+        var entry: InterviewAnswerEntry
+        var spine: [InterviewAnswerSpinePoint]
+        var metadata: InterviewAnswerMetadata
+    }
+
+    private struct CompatibilityAnswerSegment: Codable, Sendable {
+        var text: String
+        var claimType: InterviewAnswerClaimType
+        var sourceIDs: [String]
+    }
+
     private let session: URLSession
     private var generationMetadata: [UUID: InterviewGenerationMetadata] = [:]
     private var cueTasks: [UUID: Task<InterviewCue, Error>] = [:]
@@ -143,6 +158,13 @@ actor OpenAIResponsesProvider: InterviewGenerationProvider {
             throw CopilotError.missingAPIKey
         }
         let task = Task {
+            if Self.usesSegmentedCompatibilityAnswer(for: request) {
+                return try await self.generateSegmentedCompatibilityAnswer(
+                    request,
+                    apiKey: credential,
+                    onProgress: onProgress
+                )
+            }
             let rawAnswer = try await perform(
                 request,
                 apiKey: credential,
@@ -166,6 +188,149 @@ actor OpenAIResponsesProvider: InterviewGenerationProvider {
         progressiveAnswerTasks[request.id] = task
         defer { progressiveAnswerTasks.removeValue(forKey: request.id) }
         return try await task.value
+    }
+
+    private static func usesSegmentedCompatibilityAnswer(
+        for request: InterviewGenerationRequest
+    ) -> Bool {
+        request.apiProtocol == .responses
+            && !request.apiBaseURL.lowercased().contains("openai.com")
+    }
+
+    private func generateSegmentedCompatibilityAnswer(
+        _ request: InterviewGenerationRequest,
+        apiKey: String,
+        onProgress: @escaping @Sendable (InterviewAnswerProgress) -> Void
+    ) async throws -> InterviewProgressiveAnswer {
+        let rawSkeleton = try await perform(
+            request,
+            apiKey: apiKey,
+            schemaName: "interview_progressive_skeleton",
+            schema: Self.makeCompatibilityAnswerSkeletonSchema(),
+            responseType: CompatibilityAnswerSkeleton.self
+        )
+        guard let skeleton = Self.normalizedCompatibilityAnswerSkeleton(rawSkeleton) else {
+            Log.suggestionEngine.error(
+                "Compatibility answer skeleton rejected spine=\(rawSkeleton.spine.count)"
+            )
+            throw CopilotError.invalidResponse
+        }
+
+        onProgress(InterviewAnswerProgress(
+            entry: skeleton.entry,
+            spine: skeleton.spine,
+            segments: [],
+            closing: nil,
+            metadata: skeleton.metadata,
+            isSpineComplete: true
+        ))
+
+        var completed = Array<InterviewAnswerSegment?>(repeating: nil, count: skeleton.spine.count)
+        try await withThrowingTaskGroup(of: (Int, InterviewAnswerSegment).self) { group in
+            for (index, point) in skeleton.spine.enumerated() {
+                group.addTask { [self] in
+                    do {
+                        let segment = try await self.generateCompatibilitySegment(
+                            request,
+                            apiKey: apiKey,
+                            skeleton: skeleton,
+                            point: point
+                        )
+                        return (index, segment)
+                    } catch let error as CopilotError where error == .cancelled {
+                        // The provider maps transport cancellation to CopilotError.cancelled.
+                        // Preserve it so an explicit stop cancels the whole segmented answer
+                        // instead of being converted into a synthetic fallback segment.
+                        throw error
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        Log.suggestionEngine.error(
+                            "Compatibility answer segment fallback point=\(point.id, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                        )
+                        return (index, Self.compatibilitySegmentFallback(for: point))
+                    }
+                }
+            }
+
+            for try await (index, segment) in group {
+                completed[index] = segment
+                let contiguousSegments = completed.prefix { $0 != nil }.compactMap { $0 }
+                onProgress(InterviewAnswerProgress(
+                    entry: skeleton.entry,
+                    spine: skeleton.spine,
+                    segments: contiguousSegments,
+                    closing: nil,
+                    metadata: skeleton.metadata,
+                    isSpineComplete: true
+                ))
+            }
+        }
+
+        let answer = InterviewProgressiveAnswer(
+            entry: skeleton.entry,
+            spine: skeleton.spine,
+            segments: completed.compactMap { $0 },
+            closing: nil,
+            metadata: skeleton.metadata
+        )
+        guard let normalized = Self.normalizedProgressiveAnswerShape(answer) else {
+            throw CopilotError.invalidResponse
+        }
+        return normalized
+    }
+
+    private func generateCompatibilitySegment(
+        _ request: InterviewGenerationRequest,
+        apiKey: String,
+        skeleton: CompatibilityAnswerSkeleton,
+        point: InterviewAnswerSpinePoint
+    ) async throws -> InterviewAnswerSegment {
+        let prompt = Self.compatibilitySegmentPrompt(
+            basePrompt: request.prompt,
+            skeleton: skeleton,
+            point: point
+        )
+        let segmentRequest = InterviewGenerationRequest(
+            id: UUID(),
+            model: request.model,
+            prompt: prompt,
+            promptCacheKey: "\(request.promptCacheKey):\(point.id)",
+            maxOutputTokens: min(max(1_200, request.maxOutputTokens / max(skeleton.spine.count, 2)), 4_000),
+            kind: request.kind,
+            fastServiceTier: request.fastServiceTier,
+            reasoningEffort: request.reasoningEffort,
+            apiProtocol: request.apiProtocol,
+            apiBaseURL: request.apiBaseURL
+        )
+        let rawSegment = try await perform(
+            segmentRequest,
+            apiKey: apiKey,
+            schemaName: "interview_progressive_segment",
+            schema: Self.makeCompatibilityAnswerSegmentSchema(),
+            responseType: CompatibilityAnswerSegment.self
+        )
+        let text = rawSegment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { throw CopilotError.invalidResponse }
+        return InterviewAnswerSegment(
+            pointID: point.id,
+            text: text,
+            claimType: rawSegment.claimType,
+            sourceIDs: rawSegment.sourceIDs
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        )
+    }
+
+    private static func compatibilitySegmentFallback(
+        for point: InterviewAnswerSpinePoint
+    ) -> InterviewAnswerSegment {
+        InterviewAnswerSegment(
+            pointID: point.id,
+            text: "请围绕“\(point.label)”说明你的判断依据、具体动作和验证方式。",
+            claimType: .professionalJudgment,
+            sourceIDs: []
+        )
     }
 
     func generateCue(_ request: InterviewGenerationRequest, credential: String?) async throws -> InterviewCue {
@@ -307,20 +472,88 @@ actor OpenAIResponsesProvider: InterviewGenerationProvider {
         responseType: Response.Type,
         onTextProgress: (@Sendable (String) -> Void)? = nil
     ) async throws -> Response {
+        if request.apiProtocol == .chatCompletion {
+            return try await performChatCompletions(
+                request,
+                apiKey: apiKey,
+                responseType: responseType,
+                onTextProgress: onTextProgress
+            )
+        }
+        guard let url = OpenRouterClient.responsesURL(from: request.apiBaseURL) else {
+            throw CopilotError.invalidRequest("Responses Base URL 无效")
+        }
+        let isOpenAIEndpoint = request.apiBaseURL.lowercased().contains("openai.com")
+        let bodyData: Data
+        if isOpenAIEndpoint {
+            bodyData = try Self.makeResponsesRequestBodyData(
+                request: request,
+                schemaName: schemaName,
+                schema: schema,
+                orderedSchemaJSON: orderedSchemaJSON
+            )
+        } else {
+            // DeepSeek's json_schema support is unreliable for the large
+            // interview schemas (it can echo the schema or return 400), while
+            // json_object reliably produces valid JSON. Embed the schema in
+            // the prompt so the model still returns the exact contract.
+            let schemaPrompt = request.prompt
+                + "\n\n<OUTPUT_SCHEMA>\n"
+                + Self.schemaJSON(schema: schema, orderedSchemaJSON: orderedSchemaJSON)
+                + "\n</OUTPUT_SCHEMA>"
+            bodyData = try Self.makeResponsesRequestBodyData(
+                request: request,
+                schemaName: schemaName,
+                schema: schema,
+                orderedSchemaJSON: nil,
+                compatibilityMode: true,
+                promptOverride: schemaPrompt,
+                formatType: "json_object"
+            )
+        }
+        do {
+            return try await performResponsesRequest(
+                request: request,
+                apiKey: apiKey,
+                url: url,
+                bodyData: bodyData,
+                responseType: responseType,
+                onTextProgress: onTextProgress
+            )
+        } catch let error as CopilotError {
+            throw error
+        }
+    }
+
+    private static func schemaJSON(
+        schema: [String: Any],
+        orderedSchemaJSON: String?
+    ) -> String {
+        if let orderedSchemaJSON { return orderedSchemaJSON }
+        guard let data = try? JSONSerialization.data(withJSONObject: schema, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else {
+            return "{}"
+        }
+        return text
+    }
+
+    private func performResponsesRequest<Response: Decodable & Sendable>(
+        request: InterviewGenerationRequest,
+        apiKey: String,
+        url: URL,
+        bodyData: Data,
+        responseType: Response.Type,
+        onTextProgress: (@Sendable (String) -> Void)?
+    ) async throws -> Response {
         let startedAt = Date()
         var firstDeltaMilliseconds: Int?
-        var urlRequest = URLRequest(url: URL(string: "https://api.openai.com/v1/responses")!)
+        var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "POST"
         urlRequest.timeoutInterval = 60
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        urlRequest.httpBody = try Self.makeResponsesRequestBodyData(
-            request: request,
-            schemaName: schemaName,
-            schema: schema,
-            orderedSchemaJSON: orderedSchemaJSON
-        )
+        urlRequest.httpBody = bodyData
 
         do {
             let (bytes, response) = try await session.bytes(for: urlRequest)
@@ -332,7 +565,17 @@ actor OpenAIResponsesProvider: InterviewGenerationProvider {
             case 401, 403: throw CopilotError.authenticationFailed
             case 429: throw CopilotError.rateLimited
             case 500...599: throw CopilotError.serverUnavailable(http.statusCode)
-            default: throw CopilotError.invalidRequest("HTTP \(http.statusCode)，请检查模型名、上下文上限和 Structured Outputs 支持。")
+            default:
+                var detail = ""
+                for try await line in bytes.lines {
+                    detail += line
+                    if detail.utf8.count > 2_000 { break }
+                }
+                let trimmed = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+                let message = trimmed.isEmpty
+                    ? "HTTP \(http.statusCode)，请检查模型名、上下文上限和 Structured Outputs 支持。"
+                    : "HTTP \(http.statusCode)：\(trimmed)"
+                throw CopilotError.invalidRequest(message)
             }
 
             var output = ""
@@ -350,6 +593,13 @@ actor OpenAIResponsesProvider: InterviewGenerationProvider {
                     }
                     output += delta
                     onTextProgress?(output)
+                } else if type == "response.failed" {
+                    let responseObject = object["response"] as? [String: Any]
+                    let errorObject = responseObject?["error"] as? [String: Any]
+                    let message = errorObject?["message"] as? String
+                        ?? responseObject?["error_description"] as? String
+                        ?? "Responses API 请求失败。"
+                    throw CopilotError.network(message)
                 } else if type == "response.incomplete" {
                     let responseObject = object["response"] as? [String: Any]
                     let details = responseObject?["incomplete_details"] as? [String: Any]
@@ -368,7 +618,7 @@ actor OpenAIResponsesProvider: InterviewGenerationProvider {
             guard let data = output.data(using: .utf8),
                   let result = try? JSONDecoder().decode(responseType, from: data) else {
                 Log.suggestionEngine.error(
-                    "Structured response decode failed schema=\(schemaName, privacy: .public) chars=\(output.utf8.count) incomplete=\(incompleteReason ?? "none", privacy: .public)"
+                    "Structured response decode failed schema=\(request.kind.rawValue, privacy: .public) chars=\(output.utf8.count) shape=\(Self.responseShapeSummary(output), privacy: .public) incomplete=\(incompleteReason ?? "none", privacy: .public)"
                 )
                 throw CopilotError.invalidResponse
             }
@@ -382,6 +632,138 @@ actor OpenAIResponsesProvider: InterviewGenerationProvider {
         }
     }
 
+    private func performChatCompletions<Response: Decodable & Sendable>(
+        _ request: InterviewGenerationRequest,
+        apiKey: String,
+        responseType: Response.Type,
+        onTextProgress: (@Sendable (String) -> Void)? = nil
+    ) async throws -> Response {
+        guard let url = OpenRouterClient.chatCompletionsURL(from: request.apiBaseURL) else {
+            throw CopilotError.invalidRequest("DeepSeek Base URL 无效")
+        }
+
+        let startedAt = Date()
+        var firstDeltaMilliseconds: Int?
+        var output = ""
+        var body: [String: Any] = [
+            "model": request.model,
+            "messages": [["role": "user", "content": request.prompt]],
+            "stream": true,
+            "max_tokens": request.maxOutputTokens,
+        ]
+        // deepseek-reasoner does not accept response_format; JSON mode is
+        // supported by deepseek-chat and the newer hybrid chat models.
+        if !request.model.lowercased().contains("reasoner") {
+            body["response_format"] = ["type": "json_object"]
+        }
+        // DeepSeek rejects reasoning_effort; OpenAI and most compatible
+        // providers accept it. The model-specific picker keeps this optional.
+        if !request.apiBaseURL.lowercased().contains("deepseek.com"),
+           request.model.lowercased() != "deepseek-chat" {
+            body["reasoning_effort"] = request.reasoningEffort.chatCompletionValue
+        }
+        if request.fastServiceTier,
+           !request.apiBaseURL.lowercased().contains("deepseek.com") {
+            body["service_tier"] = "priority"
+        }
+
+        var urlRequest = URLRequest(url: url)
+        urlRequest.httpMethod = "POST"
+        urlRequest.timeoutInterval = 120
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        do {
+            let (bytes, response) = try await session.bytes(for: urlRequest)
+            guard let http = response as? HTTPURLResponse else {
+                throw CopilotError.network("DeepSeek API 返回了未知响应。")
+            }
+            switch http.statusCode {
+            case 200...299: break
+            case 401, 403: throw CopilotError.authenticationFailed
+            case 429: throw CopilotError.rateLimited
+            case 500...599: throw CopilotError.serverUnavailable(http.statusCode)
+            default: throw CopilotError.invalidRequest("HTTP \(http.statusCode)，请检查模型名和 DeepSeek 配额。")
+            }
+
+            for try await line in bytes.lines {
+                try Task.checkCancellation()
+                guard line.hasPrefix("data: ") else { continue }
+                let payload = String(line.dropFirst(6))
+                guard payload != "[DONE]" else { break }
+                guard let data = payload.data(using: .utf8),
+                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    continue
+                }
+                if let apiError = object["error"] as? [String: Any] {
+                    let message = apiError["message"] as? String ?? "DeepSeek streaming error"
+                    throw CopilotError.network(message)
+                }
+                guard let choices = object["choices"] as? [[String: Any]],
+                      let delta = choices.first?["delta"] as? [String: Any],
+                      let content = delta["content"] as? String,
+                      !content.isEmpty else { continue }
+                if firstDeltaMilliseconds == nil {
+                    firstDeltaMilliseconds = Int(Date().timeIntervalSince(startedAt) * 1_000)
+                }
+                output += content
+                onTextProgress?(output)
+            }
+            generationMetadata[request.id] = InterviewGenerationMetadata(
+                transport: "deepseek-api",
+                firstDeltaMilliseconds: firstDeltaMilliseconds,
+                prewarmReady: nil,
+                prewarmDurationMilliseconds: nil
+            )
+            guard let result = Self.decodeJSONResponse(output, as: responseType) else {
+                Log.suggestionEngine.error(
+                    "Structured response decode failed schema=deepseek chars=\(output.utf8.count)"
+                )
+                throw CopilotError.invalidResponse
+            }
+            return result
+        } catch is CancellationError {
+            throw CopilotError.cancelled
+        } catch let error as CopilotError {
+            throw error
+        } catch {
+            throw CopilotError.network(error.localizedDescription)
+        }
+    }
+
+    private static func responseShapeSummary(_ output: String) -> String {
+        guard let data = output.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return "unparseable"
+        }
+        let spine = object["spine"] as? [[String: Any]] ?? []
+        let segments = object["segments"] as? [[String: Any]] ?? []
+        let spineIDs = spine.compactMap { $0["id"] as? String }
+        let segmentIDs = segments.compactMap { $0["pointID"] as? String }
+        let entry = object["entry"] as? [String: Any]
+        let metadata = object["metadata"] as? [String: Any]
+        return "keys=\(object.keys.sorted().joined(separator: ",")) spine=\(spine.count):\(spineIDs.joined(separator: ",")) segments=\(segments.count):\(segmentIDs.joined(separator: ",")) entry=\(entry != nil) metadata=\(metadata != nil)"
+    }
+
+    private static func decodeJSONResponse<Response: Decodable>(
+        _ output: String,
+        as type: Response.Type
+    ) -> Response? {
+        var candidate = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if candidate.hasPrefix("```") {
+            let lines = candidate.split(separator: "\n", omittingEmptySubsequences: false)
+            if lines.count >= 2, lines.first?.hasPrefix("```") == true,
+               lines.last?.hasPrefix("```") == true {
+                candidate = lines.dropFirst().dropLast().joined(separator: "\n")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        guard let data = candidate.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(type, from: data)
+    }
+
     /// JSON objects are unordered by specification, and Foundation may emit a
     /// Swift dictionary in a different key order on every process. Structured
     /// Outputs follows the schema's serialized property order while generating,
@@ -390,27 +772,34 @@ actor OpenAIResponsesProvider: InterviewGenerationProvider {
         request: InterviewGenerationRequest,
         schemaName: String,
         schema: [String: Any],
-        orderedSchemaJSON: String? = nil
+        orderedSchemaJSON: String? = nil,
+        compatibilityMode: Bool = false,
+        promptOverride: String? = nil,
+        formatType: String = "json_schema"
     ) throws -> Data {
         let placeholder = "__liveinterviewcopilot_ordered_schema_\(UUID().uuidString)__"
         let schemaValue: Any = orderedSchemaJSON == nil ? schema as Any : placeholder as Any
-        let body: [String: Any] = [
+        var textFormat: [String: Any] = ["type": formatType]
+        if formatType == "json_schema" {
+            textFormat["name"] = schemaName
+            textFormat["strict"] = !compatibilityMode
+            textFormat["schema"] = schemaValue
+        }
+        var body: [String: Any] = [
             "model": request.model,
-            "input": request.prompt,
+            "input": promptOverride ?? request.prompt,
             "reasoning": ["effort": request.reasoningEffort.rawValue],
             "max_output_tokens": request.maxOutputTokens,
             "stream": true,
-            "store": false,
-            "prompt_cache_key": request.promptCacheKey,
-            "text": [
-                "format": [
-                    "type": "json_schema",
-                    "name": schemaName,
-                    "strict": true,
-                    "schema": schemaValue,
-                ],
-            ],
+            "text": ["format": textFormat],
         ]
+        if !compatibilityMode {
+            body["store"] = false
+            body["prompt_cache_key"] = request.promptCacheKey
+        }
+        if request.fastServiceTier, !compatibilityMode {
+            body["service_tier"] = "priority"
+        }
         let encoded = try JSONSerialization.data(withJSONObject: body)
         guard let orderedSchemaJSON else { return encoded }
 
@@ -508,6 +897,101 @@ actor OpenAIResponsesProvider: InterviewGenerationProvider {
         return try! JSONSerialization.jsonObject(with: data) as! [String: Any]
     }
 
+    static func makeCompatibilityAnswerSkeletonSchema() -> [String: Any] {
+        let fullSchema = makeProgressiveAnswerOutputSchema()
+        let properties = fullSchema["properties"] as! [String: Any]
+        return [
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["entry", "spine", "metadata"],
+            "properties": [
+                "entry": properties["entry"]!,
+                "spine": properties["spine"]!,
+                "metadata": properties["metadata"]!,
+            ],
+        ]
+    }
+
+    static func makeCompatibilityAnswerSegmentSchema() -> [String: Any] {
+        let claimTypes = InterviewAnswerClaimType.allCases.map(\.rawValue)
+        return [
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["text", "claimType", "sourceIDs"],
+            "properties": [
+                "text": ["type": "string"],
+                "claimType": ["type": "string", "enum": claimTypes],
+                "sourceIDs": [
+                    "type": "array",
+                    "maxItems": 4,
+                    "items": ["type": "string"],
+                ],
+            ],
+        ]
+    }
+
+    private static func normalizedCompatibilityAnswerSkeleton(
+        _ raw: CompatibilityAnswerSkeleton
+    ) -> CompatibilityAnswerSkeleton? {
+        guard (2...4).contains(raw.spine.count) else { return nil }
+        let trim: (String) -> String = {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        var skeleton = raw
+        skeleton.entry.text = trim(skeleton.entry.text)
+        skeleton.entry.assumption = skeleton.entry.assumption.flatMap {
+            let value = trim($0)
+            return value.isEmpty ? nil : value
+        }
+        skeleton.entry.sourceIDs = skeleton.entry.sourceIDs.map(trim).filter { !$0.isEmpty }
+        for index in skeleton.spine.indices {
+            skeleton.spine[index].id = "p\(index + 1)"
+            skeleton.spine[index].label = trim(skeleton.spine[index].label)
+            skeleton.spine[index].cue = skeleton.spine[index].cue.flatMap {
+                let value = trim($0)
+                return value.isEmpty ? nil : value
+            }
+            skeleton.spine[index].sourceIDs = skeleton.spine[index].sourceIDs
+                .map(trim)
+                .filter { !$0.isEmpty }
+        }
+        skeleton.metadata.concreteGaps = Array(
+            skeleton.metadata.concreteGaps.map(trim).filter { !$0.isEmpty }.prefix(3)
+        )
+        guard !skeleton.entry.text.isEmpty,
+              skeleton.spine.allSatisfy({ !$0.label.isEmpty }) else {
+            return nil
+        }
+        return skeleton
+    }
+
+    private static func compatibilitySegmentPrompt(
+        basePrompt: String,
+        skeleton: CompatibilityAnswerSkeleton,
+        point: InterviewAnswerSpinePoint
+    ) -> String {
+        let encoder = JSONEncoder()
+        let skeletonJSON = (try? encoder.encode(skeleton)).flatMap {
+            String(data: $0, encoding: .utf8)
+        } ?? "{}"
+        let pointJSON = (try? encoder.encode(point)).flatMap {
+            String(data: $0, encoding: .utf8)
+        } ?? "{}"
+        return """
+        \(basePrompt)
+
+        <STABLE_ANSWER_SKELETON>
+        \(skeletonJSON)
+        </STABLE_ANSWER_SKELETON>
+        <CURRENT_SPINE_POINT>
+        \(pointJSON)
+        </CURRENT_SPINE_POINT>
+        <SEGMENT_TASK>
+        Only write the speakable detail for CURRENT_SPINE_POINT. Return exactly one JSON object matching OUTPUT_SCHEMA. Do not repeat the opening, other points, closing, or metadata. Do not invent candidate facts; use professional judgment or an explicit assumption when evidence is unavailable.
+        </SEGMENT_TASK>
+        """
+    }
+
     static func hasValidProgressiveAnswerShape(_ answer: InterviewProgressiveAnswer) -> Bool {
         guard (2...4).contains(answer.spine.count), answer.segments.count == answer.spine.count else {
             return false
@@ -544,7 +1028,6 @@ actor OpenAIResponsesProvider: InterviewGenerationProvider {
             && Set(rawSpineIDs) == Set(rawSegmentIDs)
         let canPairEmptyIDsByPosition = rawSpineIDs.allSatisfy(\.isEmpty)
             && rawSegmentIDs.allSatisfy(\.isEmpty)
-
         let pairedSegments: [InterviewAnswerSegment]
         if canPairByID {
             let segmentByID = Dictionary(
@@ -552,8 +1035,8 @@ actor OpenAIResponsesProvider: InterviewGenerationProvider {
             )
             pairedSegments = rawSpineIDs.compactMap { segmentByID[$0] }
         } else if canPairEmptyIDsByPosition {
-            // Empty IDs carry no contradictory mapping information. Preserve
-            // the schema-mandated array order and assign deterministic IDs.
+            // When both sides omit linkage IDs, the schema-mandated array order
+            // is the only available mapping. Assign deterministic IDs below.
             pairedSegments = raw.segments
         } else {
             // Duplicate or contradictory non-empty IDs are ambiguous. Never

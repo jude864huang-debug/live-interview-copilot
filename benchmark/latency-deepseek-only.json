@@ -1,0 +1,117 @@
+{
+  "summary": {
+    "model": "gpt-5.6-terra",
+    "provider": "deepseek",
+    "apiModel": "deepseek-v4-flash",
+    "effort": "low",
+    "maxOutputTokens": 2400,
+    "promptCacheKey": "benchmark-gpt-5.6-terra-low",
+    "cli": null,
+    "cliTotal": null,
+    "api": null,
+    "apiTotal": null,
+    "apiSkipped": null
+  },
+  "rows": [
+    {
+      "path": "api",
+      "round": 1,
+      "ok": true,
+      "firstDeltaMs": 1098,
+      "totalMs": 5625,
+      "outputChars": 1332,
+      "transport": "deepseek-responses",
+      "usage": {
+        "input_tokens": 701,
+        "input_tokens_details": {
+          "cached_tokens": 640
+        },
+        "output_tokens": 495,
+        "output_tokens_details": {
+          "reasoning_tokens": 19
+        },
+        "total_tokens": 1196
+      }
+    },
+    {
+      "path": "api",
+      "round": 2,
+      "ok": true,
+      "firstDeltaMs": 13106,
+      "totalMs": 15383,
+      "outputChars": 1180,
+      "transport": "deepseek-responses",
+      "usage": {
+        "input_tokens": 701,
+        "input_tokens_details": {
+          "cached_tokens": 640
+        },
+        "output_tokens": 1672,
+        "output_tokens_details": {
+          "reasoning_tokens": 1240
+        },
+        "total_tokens": 2373
+      }
+    },
+    {
+      "path": "api",
+      "round": 3,
+      "ok": true,
+      "firstDeltaMs": 3822,
+      "totalMs": 9369,
+      "outputChars": 1640,
+      "transport": "deepseek-responses",
+      "usage": {
+        "input_tokens": 701,
+        "input_tokens_details": {
+          "cached_tokens": 640
+        },
+        "output_tokens": 867,
+        "output_tokens_details": {
+          "reasoning_tokens": 244
+        },
+        "total_tokens": 1568
+      }
+    },
+    {
+      "path": "api",
+      "round": 4,
+      "ok": true,
+      "firstDeltaMs": 6065,
+      "totalMs": 8631,
+      "outputChars": 1321,
+      "transport": "deepseek-responses",
+      "usage": {
+        "input_tokens": 701,
+        "input_tokens_details": {
+          "cached_tokens": 640
+        },
+        "output_tokens": 935,
+        "output_tokens_details": {
+          "reasoning_tokens": 477
+        },
+        "total_tokens": 1636
+      }
+    },
+    {
+      "path": "api",
+      "round": 5,
+      "ok": true,
+      "firstDeltaMs": 10112,
+      "totalMs": 12591,
+      "outputChars": 1488,
+      "transport": "deepseek-responses",
+      "usage": {
+        "input_tokens": 701,
+        "input_tokens_details": {
+          "cached_tokens": 640
+        },
+        "output_tokens": 1457,
+        "output_tokens_details": {
+          "reasoning_tokens": 922
+        },
+        "total_tokens": 2158
+      }
+    }
+  ]
+}

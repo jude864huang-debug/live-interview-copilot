@@ -33,8 +33,8 @@ cd "$(dirname "$0")/.."
 ROOT_DIR="$(pwd)"
 SWIFT_DIR="$ROOT_DIR/LiveInterviewCopilot"
 APP_NAME="Live Interview Copilot"
-APP_EXECUTABLE_NAME="LiveInterviewCopilot"
-BUNDLE_ID="com.jude864huang.liveinterviewcopilot.app"
+APP_EXECUTABLE_NAME="OpenOats"
+BUNDLE_ID="com.openoats.app"
 SKIP_SIGN="${SKIP_SIGN:-0}"
 SKIP_INSTALL="${SKIP_INSTALL:-0}"
 RELEASE_BUILD="${RELEASE_BUILD:-0}"
@@ -300,7 +300,7 @@ else
       codesign --force --sign - "$APP_DIR/Contents/Resources/node"
     fi
     codesign --force --sign - \
-      --requirements '=designated => identifier "com.jude864huang.liveinterviewcopilot.app"' \
+      --requirements '=designated => identifier "com.openoats.app"' \
       --entitlements "$ENTITLEMENTS" \
       "$APP_DIR"
     codesign --verify --deep --strict --verbose=2 "$APP_DIR"

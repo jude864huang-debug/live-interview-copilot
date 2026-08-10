@@ -2,15 +2,46 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   canSwitchTransportAfterAppServerFailure,
+  configWithModelCatalogPath,
   cueOutputSchema,
   followUpAnswerOutputSchema,
   followUpsOutputSchema,
+  normalizeModelCatalog,
   normalizeGenerateMessage,
   promptWithOutputBudget,
   progressiveAnswerOutputSchema,
   referenceAnswerOutputSchema,
   schemaForKind
 } from "./codex-worker.mjs";
+
+test("older model catalogs get the required reasoning-summary capability field", () => {
+  const original = {
+    models: [
+      { slug: "native", supports_reasoning_summaries: true },
+      { slug: "external" }
+    ],
+    version: 1
+  };
+  const normalized = normalizeModelCatalog(original);
+  assert.equal(normalized.changed, true);
+  assert.equal(normalized.catalog.version, 1);
+  assert.equal(normalized.catalog.models[0].supports_reasoning_summaries, true);
+  assert.equal(normalized.catalog.models[1].supports_reasoning_summaries, false);
+});
+
+test("current model catalogs are left untouched", () => {
+  const catalog = { models: [{ slug: "native", supports_reasoning_summaries: true }] };
+  const normalized = normalizeModelCatalog(catalog);
+  assert.equal(normalized.changed, false);
+  assert.equal(normalized.catalog, catalog);
+});
+
+test("compatibility Codex home replaces the inherited catalog before CLI startup", () => {
+  const config = 'model = "gpt-5.6-terra"\nmodel_catalog_json = "/old/catalog.json"\n';
+  const normalized = configWithModelCatalogPath(config, "/tmp/compatible-catalog.json");
+  assert.ok(normalized.includes('model_catalog_json = "/tmp/compatible-catalog.json"'));
+  assert.doesNotMatch(normalized, /old\/catalog/);
+});
 
 test("transport fallback never concatenates a second JSON document after a delta", () => {
   assert.equal(canSwitchTransportAfterAppServerFailure(false), true);
@@ -81,6 +112,12 @@ test("Swift snake-case worker fields are normalized", () => {
     fastServiceTier: true,
     reasoningEffort: "medium"
   });
+});
+
+test("Codex reasoning efforts include high and extra high", () => {
+  assert.equal(normalizeGenerateMessage({ reasoning_effort: "high" }).reasoningEffort, "high");
+  assert.equal(normalizeGenerateMessage({ reasoning_effort: "xhigh" }).reasoningEffort, "xhigh");
+  assert.equal(normalizeGenerateMessage({ reasoning_effort: "unsupported" }).reasoningEffort, "low");
 });
 
 test("invalid budgets get a safe per-kind default and valid budgets are bounded", () => {

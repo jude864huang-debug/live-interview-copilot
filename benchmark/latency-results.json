@@ -1,0 +1,16 @@
+{
+  "summary": {
+    "model": "gpt-5.6-terra",
+    "provider": "deepseek",
+    "apiModel": "deepseek-chat",
+    "effort": "low",
+    "maxOutputTokens": 64,
+    "promptCacheKey": "benchmark-gpt-5.6-terra-low",
+    "cli": null,
+    "cliTotal": null,
+    "api": null,
+    "apiTotal": null,
+    "apiSkipped": "deepseek API key not set"
+  },
+  "rows": []
+}

@@ -37,7 +37,7 @@ struct SettingsStorage {
             defaults: defaults,
             secretStore: .keychain,
             defaultNotesDirectory: FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Documents/LiveInterviewCopilot"),
+                .appendingPathComponent("Documents/Live Interview Copilot"),
             runMigrations: true
         )
     }
@@ -49,7 +49,11 @@ typealias AppSettingsStorage = SettingsStorage
 // MARK: - Keychain Helper
 
 enum KeychainHelper {
-    private static let service = "com.jude864huang.liveinterviewcopilot.app"
+    /// Keep secrets under the bundle identifier of the app that is actually
+    /// running. This preserves credentials when the locally shipped OpenOats
+    /// bundle (`com.openoats.app`) is rebuilt from this source tree.
+    private static let service = Bundle.main.bundleIdentifier
+        ?? "com.jude864huang.liveinterviewcopilot.app"
 
     static func save(key: String, value: String) {
         guard let data = value.data(using: .utf8) else { return }
@@ -65,8 +69,9 @@ enum KeychainHelper {
         SecItemAdd(query as CFDictionary, nil)
     }
 
-    static func saveIfMissing(key: String, value: String) {
-        guard let data = value.data(using: .utf8) else { return }
+    @discardableResult
+    static func saveIfMissing(key: String, value: String) -> Bool {
+        guard let data = value.data(using: .utf8) else { return false }
 
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -75,7 +80,8 @@ enum KeychainHelper {
             kSecValueData as String: data,
         ]
 
-        SecItemAdd(query as CFDictionary, nil)
+        let status = SecItemAdd(query as CFDictionary, nil)
+        return status == errSecSuccess || status == errSecDuplicateItem
     }
 
     static func load(key: String) -> String? {

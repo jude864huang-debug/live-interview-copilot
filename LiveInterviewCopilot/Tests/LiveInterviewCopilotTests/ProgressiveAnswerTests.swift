@@ -43,6 +43,19 @@ final class ProgressiveAnswerTests: XCTestCase {
         XCTAssertNotNil(closing["anyOf"])
     }
 
+    func testCompatibilitySchemasSeparateStableSkeletonFromSegments() throws {
+        let skeleton = OpenAIResponsesProvider.makeCompatibilityAnswerSkeletonSchema()
+        XCTAssertEqual(skeleton["required"] as? [String], ["entry", "spine", "metadata"])
+        let skeletonProperties = try XCTUnwrap(skeleton["properties"] as? [String: Any])
+        XCTAssertNil(skeletonProperties["segments"])
+        XCTAssertNil(skeletonProperties["closing"])
+
+        let segment = OpenAIResponsesProvider.makeCompatibilityAnswerSegmentSchema()
+        XCTAssertEqual(segment["required"] as? [String], ["text", "claimType", "sourceIDs"])
+        let segmentProperties = try XCTUnwrap(segment["properties"] as? [String: Any])
+        XCTAssertEqual(segmentProperties["text"] as? [String: String], ["type": "string"])
+    }
+
     func testResponsesRequestBodyPreservesProgressiveSchemaPropertyOrder() throws {
         let request = InterviewGenerationRequest(
             id: UUID(),

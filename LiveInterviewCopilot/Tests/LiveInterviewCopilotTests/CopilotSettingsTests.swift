@@ -39,6 +39,8 @@ final class CopilotSettingsTests: XCTestCase {
             store.interviewReferenceAnswerModel,
             SettingsStore.defaultInterviewReferenceAnswerModel
         )
+        XCTAssertEqual(store.interviewCodexModel, SettingsStore.defaultInterviewCodexModel)
+        XCTAssertEqual(store.interviewCodexReasoningEffort, .low)
         XCTAssertFalse(store.interviewIncludeCandidateAnswersInContext)
         XCTAssertTrue(store.interviewCodexSpeedModeEnabled)
         XCTAssertFalse(store.interviewCodexFastServiceTierEnabled)
@@ -56,6 +58,36 @@ final class CopilotSettingsTests: XCTestCase {
         XCTAssertEqual(store.interviewLensSize, .defaultValue)
         XCTAssertEqual(store.interviewLensDisplayPlacements, [:])
         XCTAssertFalse(store.suggestionsAlwaysOnTop)
+    }
+
+    func testCodexModelAndReasoningSettingsRoundTrip() {
+        let store = makeStore()
+
+        store.interviewCodexModel = "gpt-5.6-luna"
+        store.interviewCodexReasoningEffort = .xhigh
+
+        XCTAssertEqual(store.interviewCodexModel, "gpt-5.6-luna")
+        XCTAssertEqual(store.interviewCodexReasoningEffort, .xhigh)
+    }
+
+    func testGenerationRoutePersistsWithoutCreatingAnInterviewEngine() {
+        let name = "com.jude864huang.liveinterviewcopilot.copilot-route.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+        let store = makeStore(defaults: defaults)
+
+        XCTAssertEqual(store.interviewInferencePreference, .apiPreferred)
+
+        store.interviewInferencePreference = .codexOnly
+
+        XCTAssertEqual(store.interviewInferencePreference, .codexOnly)
+        XCTAssertEqual(defaults.string(forKey: "copilotInferenceProvider"), "codexOnly")
+        XCTAssertEqual(makeStore(defaults: defaults).interviewInferencePreference, .codexOnly)
+    }
+
+    func testCodexCLIUsesTheUpdatedUserFacingLabels() {
+        XCTAssertEqual(InterviewInferencePreference.codexOnly.label, "仅 Codex CLI")
+        XCTAssertEqual(InterviewProvider.codexSubscription.label, "Codex CLI")
     }
 
     func testInterviewLensSupportedSelectionsAndFontScalesAreStable() {

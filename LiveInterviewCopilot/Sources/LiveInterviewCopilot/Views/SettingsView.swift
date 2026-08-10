@@ -61,8 +61,9 @@ private struct CopilotSettingsTab: View {
     @Environment(AppCoordinator.self) private var coordinator
     @State private var confirmDeleteSession = false
     @State private var confirmDeleteAll = false
-    @State private var openAIValidation: APIKeyValidator.ValidationResult?
-    @State private var validatingOpenAI = false
+    @State private var apiModelsLoading = false
+    @State private var apiModelsError: String?
+    @State private var modelLoadTask: Task<Void, Never>?
     @State private var microphonePermission = AVCaptureDevice.authorizationStatus(for: .audio)
     @State private var tencentConnectionMessage: String?
     @State private var tencentConnectionSucceeded = false
@@ -73,6 +74,22 @@ private struct CopilotSettingsTab: View {
     @State private var showQwenAdvanced = false
 
     private var engine: CustomerCopilotEngine? { coordinator.customerCopilotEngine }
+    private var codexModelPresetLabel: String {
+        modelDisplayName(settings.interviewCodexModel)
+    }
+    private var defaultAPIBaseURL: String {
+        settings.interviewAPIProtocol == .chatCompletion
+            ? "https://api.deepseek.com"
+            : "https://api.openai.com"
+    }
+    private var defaultAPIModel: String {
+        settings.interviewAPIProtocol == .chatCompletion
+            ? "deepseek-chat"
+            : SettingsStore.defaultInterviewMainAnswerModel
+    }
+    private var activeAPIModelLabel: String {
+        settings.interviewAPIModel.isEmpty ? defaultAPIModel : settings.interviewAPIModel
+    }
 
     var body: some View {
         ScrollView(.vertical) {
@@ -318,34 +335,150 @@ private struct CopilotSettingsTab: View {
 
             Section("文字生成") {
                 Picker("生成通路", selection: Binding(
-                    get: { engine?.inferencePreference ?? .apiPreferred },
-                    set: { engine?.inferencePreference = $0 }
+                    get: { settings.interviewInferencePreference },
+                    set: { preference in
+                        guard settings.interviewInferencePreference != preference else { return }
+                        // A live engine forwards this directly to the durable
+                        // setting; without an engine, the setting still takes
+                        // effect for the next interview.
+                        if let engine {
+                            engine.inferencePreference = preference
+                        } else {
+                            settings.interviewInferencePreference = preference
+                        }
+                    }
                 )) {
                     ForEach([InterviewInferencePreference.apiPreferred, .codexOnly], id: \.rawValue) { value in
                         Text(value.label).tag(value)
                     }
                 }
                 .accessibilityIdentifier("settings.copilot.inferenceProviderPicker")
-                TextField("主回答模型", text: $settings.interviewMainAnswerModel)
-                    .accessibilityHint("用于生成唯一的渐进参考回答；模型名会原样传给 OpenAI API 或本机 Codex CLI")
-                Text("默认 \(SettingsStore.defaultInterviewMainAnswerModel)。同一次请求会依次提交可开口句、逻辑锚点和专业展开，不再并行展示两套答案。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Picker("回答深度", selection: $settings.interviewAnswerDepth) {
-                    ForEach(InterviewAnswerDepth.allCases) { depth in
-                        Text(depth.label).tag(depth)
+                if settings.interviewInferencePreference == .apiPreferred {
+                    Picker("API 协议", selection: $settings.interviewAPIProtocol) {
+                        ForEach(InterviewAPIProtocol.allCases) { apiProtocol in
+                            Text(apiProtocol.label).tag(apiProtocol)
+                        }
                     }
+                    .accessibilityIdentifier("settings.copilot.apiProtocolPicker")
+                    .onChange(of: settings.interviewAPIProtocol) { _, newValue in
+                        applyProtocolDefaults(newValue)
+                        scheduleModelLoad()
+                    }
+                    TextField(
+                        "API Base URL",
+                        text: $settings.interviewAPIBaseURL,
+                        prompt: Text(defaultAPIBaseURL)
+                    )
+                        .font(.system(size: 11, design: .monospaced))
+                        .onChange(of: settings.interviewAPIBaseURL) { _, _ in
+                            scheduleModelLoad()
+                        }
+                    HStack {
+                        SecureField("API Key", text: $settings.interviewAPIKey)
+                            .onChange(of: settings.interviewAPIKey) { _, _ in
+                                scheduleModelLoad()
+                            }
+                        Button(apiModelsLoading ? "加载中…" : "验证并加载模型") {
+                            Task { await loadAPIModels() }
+                        }
+                        .disabled(apiModelsLoading || settings.interviewAPIKey.isEmpty)
+                    }
+                    if let apiModelsError {
+                        Text(apiModelsError)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.orange)
+                    }
+                    if settings.interviewAPIModelOptions.isEmpty {
+                        TextField(
+                            "主回答模型",
+                            text: $settings.interviewAPIModel,
+                            prompt: Text(defaultAPIModel)
+                        )
+                    } else {
+                        Picker("主回答模型", selection: $settings.interviewAPIModel) {
+                            ForEach(settings.interviewAPIModelOptions, id: \.self) { model in
+                                Text(model).tag(model)
+                            }
+                        }
+                    }
+                    if settings.interviewAPIModelOptions.isEmpty {
+                        TextField("备用回答模型", text: $settings.interviewFallbackAnswerModel)
+                            .accessibilityHint("主回答在可用首句前失败时启动")
+                    } else {
+                        Picker("备用回答模型", selection: Binding(
+                            get: { settings.interviewFallbackAnswerModel },
+                            set: { settings.interviewFallbackAnswerModel = $0 }
+                        )) {
+                            Text("不使用").tag("")
+                            ForEach(settings.interviewAPIModelOptions, id: \.self) { model in
+                                Text(model).tag(model)
+                            }
+                        }
+                        .accessibilityHint("主回答在可用首句前失败时启动；留空则只使用主模型")
+                    }
+                    Picker("思考深度", selection: $settings.interviewAnswerDepth) {
+                        ForEach(InterviewAnswerDepth.allCases) { depth in
+                            Text(depth.label).tag(depth)
+                        }
+                    }
+                    Text(settings.interviewAnswerDepth.targetDescription)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if settings.interviewAPIProtocol == .responses {
+                        Toggle("API 快速模式", isOn: $settings.interviewAPIFastServiceTierEnabled)
+                            .accessibilityHint("对支持 Priority Processing 服务的模型启用，会增加用量或费用")
+                        Text("Responses API 会在支持该服务层的模型上使用 priority service tier；Chat Completions 协议一般没有等价入口。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("API key 只保存在 macOS Keychain。生成通路选择 API 优先时，会把精简知识包、最近六轮面试官问题和当前问题发送给所选 API；候选人转写只有开启上方开关后才发送。缺少 key 时使用 Codex CLI 通路。")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                    Text("主回答通过 \(settings.interviewAPIProtocol.label) 使用 \(activeAPIModelLabel)。若在可用首句出现前失败，会先切换到备用模型；若备用也失败，会解除本场锁定。实际模型和切换原因可在「运行详情」查看。")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    HStack {
+                        TextField("Codex CLI 模型 ID", text: $settings.interviewCodexModel)
+                            .accessibilityIdentifier("settings.copilot.codexModelField")
+                        Menu(codexModelPresetLabel) {
+                            ForEach(SettingsStore.interviewCodexModelPresets, id: \.self) { model in
+                                Button(modelDisplayName(model)) {
+                                    settings.interviewCodexModel = model
+                                }
+                            }
+                        }
+                    }
+                    Text("Codex CLI 主回答当前使用 \(settings.interviewCodexModel.isEmpty ? SettingsStore.defaultInterviewCodexModel : settings.interviewCodexModel)。可直接输入其他模型 ID；快速思路仍使用下方备用模型。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Picker("Codex 思考深度", selection: $settings.interviewCodexReasoningEffort) {
+                        ForEach([InterviewReasoningEffort.none, .low, .medium, .high, .xhigh], id: \.rawValue) { effort in
+                            Text(effort.label).tag(effort)
+                        }
+                    }
+                    .accessibilityIdentifier("settings.copilot.codexReasoningPicker")
+                    Text(settings.interviewCodexReasoningEffort.description)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextField("备用回答模型", text: $settings.interviewFallbackAnswerModel)
+                        .accessibilityHint("主回答在可用首句前失败时启动；备用也失败则解除本场锁定")
+                    Text("默认 \(SettingsStore.defaultInterviewFallbackAnswerModel)。只有主回答模型在可用首句前失败时才会切换到备用模型；若备用模型也失败，会解除本场锁定，后续可再回到用户选择的主模型。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Toggle(isOn: $settings.interviewCodexFastServiceTierEnabled) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Label("Codex 官方 Fast mode", systemImage: "hare.fill")
+                            Label("对支持该服务层的 Codex 模型提速，但会消耗更多订阅额度；备用 \(settings.interviewFallbackAnswerModel) 使用自身的低延迟通路。", systemImage: "exclamationmark.circle")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .accessibilityHint("控制 Codex 官方 Fast mode；开启后会增加订阅额度消耗")
                 }
-                Text(settings.interviewAnswerDepth.targetDescription)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                TextField("备用回答模型", text: $settings.interviewFallbackAnswerModel)
-                    .accessibilityHint("只在 Terra 明确失败且尚未显示可用首句时启动")
-                Text("默认 \(SettingsStore.defaultInterviewFallbackAnswerModel)。只有 Terra 请求失败且尚未显示可用首句时才会切换；切换后，本次面试的后续主回答继续使用备用模型。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
                 Toggle("将我的转写用于后续文字提示", isOn: $settings.interviewIncludeCandidateAnswersInContext)
                     .accessibilityHint("关闭时仍转写并本地保存，但不会发送给后续文字模型")
                 Text("默认关闭。开启后，最近六轮候选人回答每轮最多发送约 500 字，当前回答最多约 800 字；转写只帮助理解追问，不能作为个人经历或数字的事实依据。腾讯云 ASR 仍会接收当前活动角色的音频。")
@@ -365,38 +498,6 @@ private struct CopilotSettingsTab: View {
                 .accessibilityHint("调整主回答使用的精简知识包大小")
                 Text("各材料分类仍保留既定配额，分类内部会按当前问题相关度排序；可能追问使用更小的上下文。完整文件只保留在本机。")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Toggle(isOn: $settings.interviewCodexFastServiceTierEnabled) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Label("Codex 官方 Fast mode", systemImage: "hare.fill")
-                        Label("对支持该服务层的 Codex 模型提速，但会消耗更多订阅额度；备用 Spark 使用自身的低延迟通路。", systemImage: "exclamationmark.circle")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                .accessibilityHint("控制 Codex 官方 Fast mode；开启后会增加订阅额度消耗")
-                HStack {
-                    SecureField("OpenAI API Key", text: $settings.openAIApiKey)
-                    Button(validatingOpenAI ? "验证中…" : "验证") {
-                        validatingOpenAI = true
-                        Task {
-                            openAIValidation = await APIKeyValidator.validateOpenAIKey(settings.openAIApiKey)
-                            validatingOpenAI = false
-                        }
-                    }
-                    .disabled(validatingOpenAI || settings.openAIApiKey.isEmpty)
-                }
-                if let openAIValidation {
-                    Text(validationText(openAIValidation))
-                        .font(.system(size: 10))
-                        .foregroundStyle(validationColor(openAIValidation))
-                }
-                Text("API key 只保存在 macOS Keychain。API 模式会把精简知识包、最近六轮面试官问题和当前问题发送给 OpenAI；候选人转写只有开启上方开关后才发送。费用与 ChatGPT Pro 分开，缺少 key 时使用 Codex 订阅通路。")
-                    .font(.system(size: 10)).foregroundStyle(.secondary)
-                Text("正式支持通路：配置 OpenAI API Key 后，主回答优先通过 Responses API 使用 Terra。Codex 订阅与 Spark 属于实验性兼容通路，需要用户自行登录，实际可用性取决于账号权限。Terra 若在可用首句出现前失败，本次面试后续会固定使用 Spark；实际模型和切换原因可在「运行详情」查看。")
-                    .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -426,8 +527,16 @@ private struct CopilotSettingsTab: View {
             }
 
             Section("本地留存") {
-                Text("面试转写和提示长期保存在本机；原始音频只在当前轮次的内存缓冲中存在，绝不写入磁盘。删除操作不可恢复。")
+                Text("面试转写和提示会导出到下方目录；历史记录和本地录音仍由应用安全地关联保存。删除操作不可恢复。")
                     .font(.system(size: 10)).foregroundStyle(.secondary)
+                HStack {
+                    Text(settings.notesFolderPath)
+                        .font(.system(size: 11))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                    Button("更改目录…", action: chooseLocalRetentionFolder)
+                }
                 HStack {
                     Button("删除本场面试（含转写）", role: .destructive) { confirmDeleteSession = true }
                     Button("清空全部 Copilot 历史", role: .destructive) { confirmDeleteAll = true }
@@ -461,6 +570,19 @@ private struct CopilotSettingsTab: View {
         }
         .confirmationDialog("清空全部 Copilot 历史？", isPresented: $confirmDeleteAll, titleVisibility: .visible) {
             Button("全部删除", role: .destructive) { engine?.deleteAllHistory() }
+        }
+    }
+
+    private func chooseLocalRetentionFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.message = "选择面试转写和笔记的本地留存目录"
+
+        if panel.runModal() == .OK, let url = panel.url {
+            settings.notesFolderPath = url.path
+            settings.saveNotesFolderBookmark(from: url)
         }
     }
 
@@ -625,18 +747,89 @@ private struct CopilotSettingsTab: View {
         }
     }
 
-    private func validationText(_ result: APIKeyValidator.ValidationResult) -> String {
-        switch result {
-        case .valid: "API key 可用"
-        case .invalid(let message), .networkError(let message): message
+    private func modelDisplayName(_ model: String) -> String {
+        let normalized = model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch normalized {
+        case "gpt-5.6-terra": return "Terra"
+        case "gpt-5.6-luna": return "Luna"
+        case "gpt-5.3-codex-spark": return "Spark"
+        default: return normalized.isEmpty ? "自定义" : model
         }
     }
 
-    private func validationColor(_ result: APIKeyValidator.ValidationResult) -> Color {
-        switch result {
-        case .valid: .green
-        case .invalid: .red
-        case .networkError: .orange
+    private func applyProtocolDefaults(_ apiProtocol: InterviewAPIProtocol) {
+        let defaults = apiProtocol == .chatCompletion
+            ? ("https://api.deepseek.com", "deepseek-chat")
+            : ("https://api.openai.com", SettingsStore.defaultInterviewMainAnswerModel)
+        let currentBase = settings.interviewAPIBaseURL
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if currentBase.isEmpty
+            || currentBase == "https://api.openai.com"
+            || currentBase == "https://api.deepseek.com" {
+            settings.interviewAPIBaseURL = defaults.0
+        }
+        if settings.interviewAPIModel.isEmpty {
+            settings.interviewAPIModel = defaults.1
+        }
+        settings.interviewAPIModelOptions = []
+    }
+
+    private func scheduleModelLoad() {
+        modelLoadTask?.cancel()
+        modelLoadTask = Task {
+            try? await Task.sleep(for: .milliseconds(700))
+            guard !Task.isCancelled else { return }
+            await loadAPIModels()
+        }
+    }
+
+    private func loadAPIModels() async {
+        let key = settings.interviewAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty,
+              let url = OpenRouterClient.modelsURL(from: settings.interviewAPIBaseURL) else {
+            return
+        }
+        apiModelsLoading = true
+        apiModelsError = nil
+        defer { apiModelsLoading = false }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                apiModelsError = "模型列表加载失败：无法识别的响应"
+                return
+            }
+            guard (200...299).contains(http.statusCode) else {
+                apiModelsError = http.statusCode == 401 || http.statusCode == 403
+                    ? "API key 无效或无权访问模型列表"
+                    : "模型列表加载失败：HTTP \(http.statusCode)"
+                return
+            }
+            struct ModelsResponse: Decodable {
+                let data: [ModelEntry]
+            }
+            struct ModelEntry: Decodable {
+                let id: String
+            }
+            let decoded = try JSONDecoder().decode(ModelsResponse.self, from: data)
+            let ids = decoded.data.map(\.id).filter { !$0.isEmpty }
+            guard !ids.isEmpty else {
+                apiModelsError = "模型列表为空，请检查 Base URL"
+                return
+            }
+            settings.interviewAPIModelOptions = ids.sorted()
+            if settings.interviewAPIModel.isEmpty || !ids.contains(settings.interviewAPIModel) {
+                settings.interviewAPIModel = ids.first ?? settings.interviewAPIModel
+            }
+            if settings.interviewFallbackAnswerModel.isEmpty
+                || !ids.contains(settings.interviewFallbackAnswerModel) {
+                settings.interviewFallbackAnswerModel = ""
+            }
+        } catch {
+            apiModelsError = "模型列表加载失败：\(error.localizedDescription)"
         }
     }
 }

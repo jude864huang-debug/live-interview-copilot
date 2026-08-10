@@ -55,6 +55,15 @@ final class CustomerCopilotEngine {
 
     private(set) var generationState: CopilotGenerationState = .listening
     private(set) var currentQuestion = ""
+    /// Original ASR text for the active interviewer question before user correction.
+    private(set) var asrOriginalQuestion = ""
+    /// True after the user has confirmed a corrected question for the active turn.
+    private(set) var questionWasCorrected = false
+    private(set) var questionCorrectionMode: QuestionCorrectionMode = .idle
+    /// Draft text while correcting; equals currentQuestion when idle.
+    private(set) var questionCorrectionDraft = ""
+    private(set) var questionRiskHighlights: [QuestionRiskHighlight] = []
+    private(set) var activeQuestionHighlightID: UUID?
     private(set) var suggestion: InterviewCue?
     private(set) var supplementalSuggestion: InterviewCue?
     private(set) var cuePreviewItems: [InterviewLiveSupplementItem] = []
@@ -154,9 +163,14 @@ final class CustomerCopilotEngine {
     var realtimeModel: String {
         didSet { defaults.set(realtimeModel, forKey: "copilotRealtimeModel") }
     }
+    /// The route has one source of truth: the durable app setting. Keeping a
+    /// second stored copy here allowed a live engine to outlast a setting
+    /// change and submit the next interview on the old provider.
     var inferencePreference: InterviewInferencePreference {
-        didSet {
-            defaults.set(inferencePreference.rawValue, forKey: "copilotInferenceProvider")
+        get { settings.interviewInferencePreference }
+        set {
+            guard settings.interviewInferencePreference != newValue else { return }
+            settings.interviewInferencePreference = newValue
             if let transcriptionEngine { attachRealtimeAudio(to: transcriptionEngine) }
         }
     }
@@ -165,29 +179,84 @@ final class CustomerCopilotEngine {
     }
 
     var referenceAnswerModel: String {
-        let configured = settings.interviewReferenceAnswerModel
+        let configured = settings.interviewAPIModel
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return configured.isEmpty ? SettingsStore.defaultInterviewReferenceAnswerModel : configured
+        if !configured.isEmpty { return configured }
+        return settings.interviewAPIProtocol == .chatCompletion
+            ? "deepseek-chat"
+            : settings.interviewMainAnswerModel
+    }
+
+    /// The default model for API-backed cue and follow-up requests. Keeps the
+    /// legacy `apiModel` property for persisted history compatibility.
+    var activeAPIModel: String {
+        referenceAnswerModel
+    }
+
+    var codexMainModel: String {
+        let configured = settings.interviewCodexModel
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return configured.isEmpty ? SettingsStore.defaultInterviewCodexModel : configured
     }
 
     var fallbackAnswerModel: String {
         let configured = settings.interviewFallbackAnswerModel
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        if inferencePreference == .apiPreferred || referenceProvider == .openAIAPI {
+            // Never send a Codex-only model name to an API provider. Spark and
+            // the Codex presets can leak in through old settings or a stale
+            // default, and DeepSeek/OpenAI both reject them with HTTP 400.
+            let codexOnlyNames: Set<String> = [
+                SettingsStore.defaultInterviewCodexCueModel,
+                SettingsStore.defaultInterviewCodexModel,
+                SettingsStore.defaultInterviewReferenceAnswerModel,
+            ]
+            if codexOnlyNames.contains(configured) {
+                return ""
+            }
+            let loadedModels = settings.interviewAPIModelOptions
+            if !loadedModels.isEmpty && !loadedModels.contains(configured) {
+                return ""
+            }
+            return configured
+        }
         return configured.isEmpty ? SettingsStore.defaultInterviewFallbackAnswerModel : configured
     }
 
+    /// The model that started the active answer. It follows the selected
+    /// provider when idle and remains stable after a fallback takes ownership.
+    var primaryAnswerModel: String {
+        if let initialModel = answerAttemptedModels.first, !initialModel.isEmpty {
+            return initialModel
+        }
+        if inferencePreference == .codexOnly || referenceProvider == .codexSubscription {
+            return codexMainModel
+        }
+        return referenceAnswerModel
+    }
+
+    var activeAnswerModel: String {
+        isUsingFallbackAnswerModelForSession ? fallbackAnswerModel : primaryAnswerModel
+    }
+
+    private var activeReasoningEffort: InterviewReasoningEffort {
+        switch referenceProvider ?? activeProvider {
+        case .openAIAPI, .deepSeekAPI:
+            return settings.interviewAnswerDepth.reasoningEffort
+        default:
+            return settings.interviewCodexReasoningEffort
+        }
+    }
+
     var runDiagnostics: InterviewRunDiagnostics {
-        let activeMainModel = isUsingFallbackAnswerModelForSession
-            ? fallbackAnswerModel
-            : referenceAnswerModel
         let questions = followUpSuggestions?.items ?? []
         return InterviewRunDiagnostics(
-            mainModel: activeMainModel,
+            mainModel: activeAnswerModel,
             fallbackModel: isUsingFallbackAnswerModelForSession ? nil : fallbackAnswerModel,
             ownerModel: answerOwnerModel,
             attemptedModels: answerAttemptedModels,
             provider: referenceProvider,
-            reasoningEffort: settings.interviewAnswerDepth.reasoningEffort,
+            reasoningEffort: activeReasoningEffort,
             fallbackTriggered: answerFallbackTriggered,
             asrMilliseconds: lastASRDurationMilliseconds,
             firstDeltaMilliseconds: lastCueFirstDeltaMilliseconds,
@@ -257,7 +326,7 @@ final class CustomerCopilotEngine {
               generationState == .completed else { return false }
 
         let automaticAPIReferenceIsPending = settings.interviewAutoReferenceAnswerEnabled
-            && activeProvider == .openAIAPI
+            && (activeProvider == .openAIAPI || activeProvider == .deepSeekAPI)
             && (referenceGenerationState == .idle || referenceGenerationState == .generating)
         return !automaticAPIReferenceIsPending
     }
@@ -271,6 +340,36 @@ final class CustomerCopilotEngine {
     var canRegenerateCurrentAnswer: Bool {
         !currentQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && referenceGenerationState != .generating
+    }
+
+    /// Thinking depth currently configured for regenerate / subsequent rounds.
+    var selectedThinkingDepth: InterviewReasoningEffort {
+        activeReasoningEffort
+    }
+
+    var canCorrectCurrentQuestion: Bool {
+        let question = effectiveQuestionTextForCorrection.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !question.isEmpty
+    }
+
+    var isCorrectingQuestion: Bool {
+        questionCorrectionMode != .idle
+    }
+
+    var questionCorrectionHasChanges: Bool {
+        let draft = questionCorrectionDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let baseline = (asrOriginalQuestion.isEmpty ? currentQuestion : asrOriginalQuestion)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return !draft.isEmpty && draft != baseline
+    }
+
+    private var effectiveQuestionTextForCorrection: String {
+        let current = currentQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !current.isEmpty { return current }
+        if activeInterviewRole == .interviewer {
+            return asrPartialText.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return ""
     }
 
     private let transcriptStore: TranscriptStore
@@ -347,7 +446,7 @@ final class CustomerCopilotEngine {
         apiProvider: (any InterviewGenerationProvider)? = nil,
         codexProvider: (any InterviewGenerationProvider)? = nil,
         apiCredentialProvider: @escaping @Sendable () -> String? = {
-            KeychainHelper.load(key: "openAIApiKey")
+            KeychainHelper.load(key: "interviewAPIKey")
         },
         sessionDeleteHandler: @escaping @Sendable (String) async -> Void = { _ in },
         interviewAnswerSaveHandler: @escaping @Sendable (String, InterviewHistoryAnswer) async -> Void = { _, _ in },
@@ -376,10 +475,6 @@ final class CustomerCopilotEngine {
         self.codexModel = defaults.string(forKey: "copilotModel") ?? "gpt-5.4-mini"
         self.apiModel = defaults.string(forKey: "copilotAPIModel") ?? "gpt-5.4-mini"
         self.realtimeModel = defaults.string(forKey: "copilotRealtimeModel") ?? "gpt-realtime-2.1"
-        let storedPreference = InterviewInferencePreference(
-            rawValue: defaults.string(forKey: "copilotInferenceProvider") ?? ""
-        )
-        self.inferencePreference = storedPreference == .codexOnly ? .codexOnly : .apiPreferred
         let configuredLimit = defaults.integer(forKey: "copilotMaxContextTokens")
         self.maxContextTokens = configuredLimit > 0 ? configuredLimit : 128_000
     }
@@ -393,6 +488,7 @@ final class CustomerCopilotEngine {
         sessionID = UUID().uuidString
         generationState = .listening
         currentQuestion = ""
+        resetQuestionCorrectionState()
         suggestion = nil
         supplementalSuggestion = nil
         cuePreviewItems = []
@@ -1039,6 +1135,7 @@ final class CustomerCopilotEngine {
             beginGenerationTurn()
             previousResultWasSuperseded = false
             currentQuestion = text
+            resetQuestionCorrectionState(seedQuestion: text)
             if let manualRevision { currentQuestionRevision = manualRevision }
             draftUtteranceIDs = [utterance.id]
             candidateSpokeSincePrompt = candidateAlreadySpeaking
@@ -1049,6 +1146,12 @@ final class CustomerCopilotEngine {
         } else if wasPrepared {
             reviseGenerationTurn()
             currentQuestion = Self.joinSegments(preparedManualQuestionText, text)
+            if questionCorrectionMode == .idle {
+                asrOriginalQuestion = currentQuestion
+                questionCorrectionDraft = currentQuestion
+                questionWasCorrected = false
+                refreshQuestionRiskHighlights()
+            }
             if let manualRevision { currentQuestionRevision = max(currentQuestionRevision, manualRevision) }
             if !draftUtteranceIDs.contains(utterance.id) { draftUtteranceIDs.append(utterance.id) }
             preparedManualBoundaryID = nil
@@ -1058,6 +1161,12 @@ final class CustomerCopilotEngine {
         } else {
             reviseGenerationTurn()
             currentQuestion = Self.joinSegments(currentQuestion, text)
+            if questionCorrectionMode == .idle {
+                asrOriginalQuestion = currentQuestion
+                questionCorrectionDraft = currentQuestion
+                questionWasCorrected = false
+                refreshQuestionRiskHighlights()
+            }
             if let manualRevision { currentQuestionRevision = max(currentQuestionRevision, manualRevision) }
             draftUtteranceIDs.append(utterance.id)
             maybeActivatePredictedFollowUpReference(for: currentQuestion)
@@ -1144,8 +1253,231 @@ final class CustomerCopilotEngine {
     /// pipeline. Unlike `retryReferenceAnswer`, this remains available after a
     /// stable answer has already been committed.
     func regenerateCurrentAnswer() {
+        regenerateCurrentAnswer(reasoningEffort: nil)
+    }
+
+    /// Regenerates the current answer, optionally updating the persisted thinking
+    /// depth first so this retry and subsequent requests share the same setting.
+    func regenerateCurrentAnswer(reasoningEffort: InterviewReasoningEffort?) {
         guard canRegenerateCurrentAnswer else { return }
+        if let reasoningEffort {
+            applyThinkingDepth(reasoningEffort)
+        }
         startProgressiveAnswerGeneration(question: currentQuestion)
+    }
+
+    /// Keeps Codex reasoning effort and progressive answer depth aligned so a
+    /// manual depth pick near the regenerate control updates future rounds too.
+    func applyThinkingDepth(_ effort: InterviewReasoningEffort) {
+        settings.interviewCodexReasoningEffort = effort
+        switch effort {
+        case .none:
+            settings.interviewAnswerDepth = .concise
+        case .low:
+            settings.interviewAnswerDepth = .standard
+        case .medium, .high, .xhigh:
+            settings.interviewAnswerDepth = .deep
+        }
+    }
+
+    // MARK: - Question correction
+
+    /// Opens keyword correction mode. The sentence stays readable; only risky
+    /// spans are interactive.
+    func beginQuestionKeywordCorrection() {
+        guard canCorrectCurrentQuestion else { return }
+        ensureQuestionCorrectionBaseline()
+        questionCorrectionMode = .keyword
+        activeQuestionHighlightID = nil
+        refreshQuestionRiskHighlights()
+    }
+
+    /// Opens full-sentence editing so the user can change any part of the question.
+    func beginQuestionFullSentenceCorrection() {
+        guard canCorrectCurrentQuestion else { return }
+        ensureQuestionCorrectionBaseline()
+        questionCorrectionMode = .fullSentence
+        activeQuestionHighlightID = nil
+    }
+
+    func cancelQuestionCorrection() {
+        questionCorrectionMode = .idle
+        activeQuestionHighlightID = nil
+        questionCorrectionDraft = currentQuestion
+        refreshQuestionRiskHighlights()
+    }
+
+    func selectQuestionHighlight(_ id: UUID?) {
+        guard questionCorrectionMode == .keyword else { return }
+        activeQuestionHighlightID = id
+    }
+
+    /// Replaces one highlighted span in the correction draft. Does not regenerate.
+    func replaceQuestionHighlight(id: UUID, with replacement: String) {
+        guard questionCorrectionMode != .idle else { return }
+        let trimmed = replacement.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let highlight = questionRiskHighlights.first(where: { $0.id == id }) else { return }
+
+        var draft = questionCorrectionDraft
+        // Prefer the live UTF-16 range against the current draft when still valid.
+        if let swiftRange = Range(highlight.utf16Range, in: draft),
+           String(draft[swiftRange]) == highlight.text {
+            draft.replaceSubrange(swiftRange, with: trimmed.isEmpty ? highlight.text : trimmed)
+        } else if let found = draft.range(of: highlight.text) {
+            draft.replaceSubrange(found, with: trimmed.isEmpty ? highlight.text : trimmed)
+        } else {
+            return
+        }
+
+        questionCorrectionDraft = draft
+        activeQuestionHighlightID = nil
+        refreshQuestionRiskHighlights()
+    }
+
+    func updateQuestionCorrectionDraft(_ text: String) {
+        guard questionCorrectionMode != .idle else { return }
+        questionCorrectionDraft = text
+        if questionCorrectionMode == .keyword {
+            refreshQuestionRiskHighlights()
+        }
+    }
+
+    /// Confirms the corrected question and regenerates the answer pipeline.
+    func applyCorrectedQuestionAndRegenerate() {
+        let corrected = questionCorrectionDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !corrected.isEmpty else {
+            errorMessage = "问题不能为空。"
+            return
+        }
+
+        let baseline = (asrOriginalQuestion.isEmpty ? currentQuestion : asrOriginalQuestion)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let changed = corrected != currentQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
+            || corrected != baseline
+
+        questionCorrectionMode = .idle
+        activeQuestionHighlightID = nil
+
+        if !changed {
+            // No text change: just leave correction UI.
+            questionCorrectionDraft = currentQuestion
+            refreshQuestionRiskHighlights()
+            return
+        }
+
+        if asrOriginalQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            asrOriginalQuestion = currentQuestion
+        }
+        currentQuestion = corrected
+        questionCorrectionDraft = corrected
+        questionWasCorrected = true
+        previousResultWasSuperseded = true
+        rewriteActiveInterviewerQuestionUtterances(with: corrected)
+        reviseGenerationTurn()
+        suggestion = InterviewCue.localSkeleton(for: corrected)
+        supplementalSuggestion = nil
+        errorMessage = nil
+        refreshQuestionRiskHighlights()
+        startProgressiveAnswerGeneration(question: corrected)
+    }
+
+    /// Overwrite this turn's interviewer transcript lines so the live history
+    /// matches the user-corrected question, not only the generation prompt.
+    private func rewriteActiveInterviewerQuestionUtterances(with corrected: String) {
+        let trimmed = corrected.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let remoteDraftIDs = draftUtteranceIDs.filter { id in
+            transcriptStore.utterances.contains { $0.id == id && $0.speaker.isRemote }
+        }
+
+        if remoteDraftIDs.isEmpty {
+            // Fallback: rewrite the latest remote utterance if draft tracking is empty.
+            if let latest = transcriptStore.utterances.last(where: { $0.speaker.isRemote }) {
+                _ = transcriptStore.rewriteDisplayText(id: latest.id, text: trimmed)
+            }
+            return
+        }
+
+        // Keep one canonical corrected line for the active question turn.
+        if let primaryID = remoteDraftIDs.first {
+            _ = transcriptStore.rewriteDisplayText(id: primaryID, text: trimmed)
+        }
+        for extraID in remoteDraftIDs.dropFirst() {
+            // Drop superseded fragments so history keeps one corrected question line.
+            _ = transcriptStore.removeUtterance(id: extraID)
+        }
+        // Prefer a single non-empty draft id after correction.
+        if let primaryID = remoteDraftIDs.first {
+            draftUtteranceIDs = [primaryID]
+        }
+    }
+
+    private func ensureQuestionCorrectionBaseline() {
+        let base = effectiveQuestionTextForCorrection
+        if currentQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           !base.isEmpty {
+            currentQuestion = base
+        }
+        if asrOriginalQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            asrOriginalQuestion = currentQuestion
+        }
+        if questionCorrectionMode == .idle {
+            questionCorrectionDraft = currentQuestion
+        } else if questionCorrectionDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            questionCorrectionDraft = currentQuestion
+        }
+    }
+
+    private func refreshQuestionRiskHighlights() {
+        let text = (questionCorrectionMode == .idle ? currentQuestion : questionCorrectionDraft)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            questionRiskHighlights = []
+            return
+        }
+        let knowledgeTerms = knowledgeTermsForQuestionCorrection()
+        questionRiskHighlights = QuestionRiskHighlighter.highlights(
+            in: text,
+            knowledgeTerms: knowledgeTerms
+        )
+        if let activeQuestionHighlightID,
+           !questionRiskHighlights.contains(where: { $0.id == activeQuestionHighlightID }) {
+            self.activeQuestionHighlightID = nil
+        }
+    }
+
+    private func knowledgeTermsForQuestionCorrection() -> [String] {
+        guard let snapshot = compiler.snapshot else { return [] }
+        var terms: [String] = []
+        for source in snapshot.sources {
+            terms.append(source.title)
+            let leaf = URL(fileURLWithPath: source.relativePath).deletingPathExtension().lastPathComponent
+            terms.append(leaf)
+        }
+        for block in snapshot.blocks.prefix(80) {
+            if let heading = block.heading { terms.append(heading) }
+        }
+        // Keep English/technical package terms that already feed ASR hotwords.
+        let hotwords = InterviewHotwordExtractor.extract(
+            manualTerms: [],
+            snapshot: snapshot,
+            maximumCount: 64
+        )
+        terms.append(contentsOf: hotwords.map(\.phrase))
+        return terms
+    }
+
+    private func resetQuestionCorrectionState(seedQuestion: String = "") {
+        asrOriginalQuestion = seedQuestion
+        questionWasCorrected = false
+        questionCorrectionMode = .idle
+        questionCorrectionDraft = seedQuestion
+        questionRiskHighlights = []
+        activeQuestionHighlightID = nil
+        if !seedQuestion.isEmpty {
+            refreshQuestionRiskHighlights()
+        }
     }
 
     func generateReferenceAnswer() {
@@ -1279,7 +1611,17 @@ final class CustomerCopilotEngine {
         }
     }
 
+    /// The Settings scene can change the durable route while this engine stays
+    /// alive across interview rounds. Treat the setting as authoritative at
+    /// every request boundary, not only when the engine is constructed.
+    private func synchronizeInferencePreferenceWithSettings() {
+        let configuredPreference = settings.interviewInferencePreference
+        guard inferencePreference != configuredPreference else { return }
+        inferencePreference = configuredPreference
+    }
+
     private func startGeneration(question: String, kind: InterviewRequestKind) {
+        synchronizeInferencePreferenceWithSettings()
         if kind == .answer {
             startProgressiveAnswerGeneration(question: question)
             return
@@ -1325,7 +1667,8 @@ final class CustomerCopilotEngine {
             prompt: prepared.text,
             cacheKnowledgeHash: prepared.cacheKnowledgeHash,
             kind: kind,
-            compactCue: usesCodexSpeedCue
+            compactCue: usesCodexSpeedCue,
+            reasoningEffort: startsOnCodex ? settings.interviewCodexReasoningEffort : nil
         )
         let startedAt = Date()
         activeRequestID = request.id
@@ -1459,7 +1802,7 @@ final class CustomerCopilotEngine {
             }
         } else if inferencePreference == .apiPreferred {
             isUsingSlowFallback = true
-            fallbackReasons.append("OpenAI API：未配置可用密钥")
+            fallbackReasons.append("API：未配置可用密钥")
             lastCueFallbackReason = fallbackReasons.joined(separator: " | ")
         }
 
@@ -1478,7 +1821,8 @@ final class CustomerCopilotEngine {
             // Spark runs on its own low-latency tier. Keep the separately
             // metered priority tier for compatible Codex models and for the
             // compatibility fallback below.
-            fastServiceTier: request.fastServiceTier && !selectedModelIsSpark
+            fastServiceTier: request.fastServiceTier && !selectedModelIsSpark,
+            reasoningEffort: settings.interviewCodexReasoningEffort
         )
         attemptedModels.append(selectedModel)
         lastCueAttemptedModels = attemptedModels
@@ -1516,7 +1860,8 @@ final class CustomerCopilotEngine {
                 promptCacheKey: request.promptCacheKey,
                 maxOutputTokens: request.maxOutputTokens,
                 kind: request.kind,
-                fastServiceTier: request.fastServiceTier
+                fastServiceTier: request.fastServiceTier,
+                reasoningEffort: settings.interviewCodexReasoningEffort
             )
             let cue = try await codexProvider.generateCueStreaming(
                 fallbackRequest,
@@ -1650,7 +1995,8 @@ final class CustomerCopilotEngine {
         cacheKnowledgeHash: String,
         kind: InterviewRequestKind,
         model: String? = nil,
-        compactCue: Bool = false
+        compactCue: Bool = false,
+        reasoningEffort: InterviewReasoningEffort? = nil
     ) -> InterviewGenerationRequest {
         let contractVersion = kind == .answer ? ProgressiveAnswerPrompt.version : "legacy"
         let key = "interview:\(contractVersion):\(cacheKnowledgeHash):\(Self.promptVersion(interviewPrompt))"
@@ -1661,18 +2007,42 @@ final class CustomerCopilotEngine {
         case .followUps: 300
         case .followUpAnswer: 550
         }
+        // DeepSeek counts reasoning tokens inside max_output_tokens (Responses)
+        // and max_tokens (Chat Completions). Without headroom, the visible JSON
+        // envelope is cut mid-object and the app reports an incomplete ending.
+        let effectiveBudget = settings.interviewAPIBaseURL.lowercased().contains("deepseek.com")
+            ? min(outputBudget * 4, 12_000)
+            : outputBudget
         return InterviewGenerationRequest(
             id: UUID(),
-            model: model ?? apiModel,
+            model: model ?? activeAPIModel,
             prompt: prompt,
             promptCacheKey: key,
-            maxOutputTokens: outputBudget,
+            maxOutputTokens: effectiveBudget,
             kind: kind,
-            fastServiceTier: settings.interviewCodexFastServiceTierEnabled,
-            reasoningEffort: kind == .answer
+            fastServiceTier: inferencePreference == .codexOnly
+                ? settings.interviewCodexFastServiceTierEnabled
+                : settings.interviewAPIFastServiceTierEnabled,
+            reasoningEffort: reasoningEffort ?? (kind == .answer
                 ? settings.interviewAnswerDepth.reasoningEffort
-                : (kind == .cue || kind == .followUps ? .none : .low)
+                : (kind == .cue || kind == .followUps ? .none : .low)),
+            apiProtocol: settings.interviewAPIProtocol,
+            apiBaseURL: settings.interviewAPIBaseURL
         )
+    }
+
+    private func model(for policy: ReferenceProviderPolicy) -> String {
+        switch policy {
+        case .apiOnly: referenceAnswerModel
+        case .codexOnly: codexMainModel
+        }
+    }
+
+    private func reasoningEffort(for policy: ReferenceProviderPolicy) -> InterviewReasoningEffort {
+        switch policy {
+        case .apiOnly: settings.interviewAnswerDepth.reasoningEffort
+        case .codexOnly: settings.interviewCodexReasoningEffort
+        }
     }
 
     private enum ReferenceProviderPolicy: Equatable, Sendable {
@@ -1693,6 +2063,7 @@ final class CustomerCopilotEngine {
     }
 
     private func startProgressiveAnswerGeneration(question: String) {
+        synchronizeInferencePreferenceWithSettings()
         cancelReferenceGeneration(state: .superseded, persist: true)
         resetReferencePresentation()
 
@@ -1727,11 +2098,7 @@ final class CustomerCopilotEngine {
         let mainProviderKind: InterviewProvider
         let credential: String?
         let configuredKey = apiCredentialProvider()?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if sessionUsesFallbackModel {
-            mainProvider = codexProvider
-            mainProviderKind = .codexSubscription
-            credential = nil
-        } else if inferencePreference != .codexOnly, let configuredKey, !configuredKey.isEmpty {
+        if inferencePreference != .codexOnly, let configuredKey, !configuredKey.isEmpty {
             mainProvider = apiProvider
             mainProviderKind = .openAIAPI
             credential = configuredKey
@@ -1742,24 +2109,59 @@ final class CustomerCopilotEngine {
         }
 
         let startedAt = Date()
+        let mainModel: String
+        if sessionUsesFallbackModel {
+            // Once a fallback answer owns the session, keep using that model
+            // on subsequent questions regardless of whether the route is API
+            // or Codex. The provider remains the same protocol as the primary.
+            mainModel = fallbackAnswerModel
+        } else if mainProviderKind == .codexSubscription {
+            mainModel = codexMainModel
+        } else {
+            mainModel = referenceAnswerModel
+        }
         let mainRequest = makeRequest(
             prompt: prepared.text,
             cacheKnowledgeHash: prepared.cacheKnowledgeHash,
             kind: .answer,
-            model: sessionUsesFallbackModel ? fallbackAnswerModel : referenceAnswerModel
+            model: mainModel,
+            // The API picker and the Codex picker persist separately. Use the
+            // setting that belongs to the provider that will actually receive
+            // this request; otherwise API answer depth is silently ignored.
+            reasoningEffort: mainProviderKind == .openAIAPI
+                ? settings.interviewAnswerDepth.reasoningEffort
+                : settings.interviewCodexReasoningEffort
         )
-        let fallbackRequest: InterviewGenerationRequest? = sessionUsesFallbackModel
-            ? nil
-            : InterviewGenerationRequest(
+        // Keep a secondary fallback path while the session still uses the user-selected
+        // primary model. If that path already is Spark and it fails without a visible
+        // entry, we clear the session lock and retry the original primary model.
+        let shouldPrepareFallbackRequest = !sessionUsesFallbackModel
+            && !fallbackAnswerModel.isEmpty
+            && fallbackAnswerModel != mainModel
+        let fallbackRequest: InterviewGenerationRequest? = shouldPrepareFallbackRequest
+            ? InterviewGenerationRequest(
                 id: UUID(),
                 model: fallbackAnswerModel,
                 prompt: prepared.text,
                 promptCacheKey: mainRequest.promptCacheKey,
                 maxOutputTokens: mainRequest.maxOutputTokens,
                 kind: .answer,
-                fastServiceTier: settings.interviewCodexFastServiceTierEnabled,
-                reasoningEffort: settings.interviewAnswerDepth.reasoningEffort
+                fastServiceTier: mainRequest.fastServiceTier,
+                reasoningEffort: mainRequest.reasoningEffort,
+                apiProtocol: mainRequest.apiProtocol,
+                apiBaseURL: mainRequest.apiBaseURL
             )
+            : nil
+
+        let fallbackProvider: any InterviewGenerationProvider
+        let fallbackProviderKind: InterviewProvider
+        if mainProviderKind == .codexSubscription {
+            fallbackProvider = codexProvider
+            fallbackProviderKind = .codexSubscription
+        } else {
+            fallbackProvider = apiProvider
+            fallbackProviderKind = .openAIAPI
+        }
 
         isUsingKnowledgeBrief = prepared.usesBrief
         isUsingConfiguredKnowledgeBrief = context.knowledge != nil && prepared.usesBrief
@@ -1806,7 +2208,9 @@ final class CustomerCopilotEngine {
                 isFallback: false,
                 context: context,
                 startedAt: startedAt,
-                fallbackRequest: fallbackRequest
+                fallbackRequest: fallbackRequest,
+                fallbackProvider: fallbackProvider,
+                fallbackProviderKind: fallbackProviderKind
             )
         }
 
@@ -1820,7 +2224,9 @@ final class CustomerCopilotEngine {
         isFallback: Bool,
         context: ReferenceGenerationContext,
         startedAt: Date,
-        fallbackRequest: InterviewGenerationRequest?
+        fallbackRequest: InterviewGenerationRequest?,
+        fallbackProvider: (any InterviewGenerationProvider)? = nil,
+        fallbackProviderKind: InterviewProvider? = nil
     ) async {
         let (progressStream, progressContinuation) = AsyncStream<InterviewAnswerProgress>.makeStream()
         let progressConsumer = Task { @MainActor [weak self] in
@@ -1922,6 +2328,11 @@ final class CustomerCopilotEngine {
             if isFallback {
                 answerFallbackTask = nil
                 if answerMainFailed || mainAnswerRequestID == nil {
+                    // Spark/fallback failed without owning a visible entry. Unlock the
+                    // session so the next attempt can return to the user-selected model.
+                    restorePrimaryAnswerModelAfterFallbackFailure(
+                        failedFallbackModel: request.model
+                    )
                     failProgressiveAnswer(terminalError, context: context, request: request, startedAt: startedAt)
                 }
             } else {
@@ -1931,9 +2342,22 @@ final class CustomerCopilotEngine {
                     if answerFallbackTriggered, answerFallbackTask == nil {
                         failProgressiveAnswer(terminalError, context: context, request: request, startedAt: startedAt)
                     } else {
-                        launchProgressiveFallback(fallbackRequest, context: context, startedAt: startedAt)
+                        launchProgressiveFallback(
+                            fallbackRequest,
+                            provider: fallbackProvider ?? codexProvider,
+                            providerKind: fallbackProviderKind ?? .codexSubscription,
+                            context: context,
+                            startedAt: startedAt
+                        )
                     }
                 } else if answerFallbackTask == nil {
+                    // No secondary model left. If this attempt was itself a session-level
+                    // fallback (e.g. Spark), unlock so the UI can retry the original model.
+                    if isUsingFallbackAnswerModelForSession {
+                        restorePrimaryAnswerModelAfterFallbackFailure(
+                            failedFallbackModel: request.model
+                        )
+                    }
                     failProgressiveAnswer(terminalError, context: context, request: request, startedAt: startedAt)
                 }
             }
@@ -1942,6 +2366,8 @@ final class CustomerCopilotEngine {
 
     private func launchProgressiveFallback(
         _ request: InterviewGenerationRequest,
+        provider: any InterviewGenerationProvider,
+        providerKind: InterviewProvider,
         context: ReferenceGenerationContext,
         startedAt: Date
     ) {
@@ -1960,15 +2386,30 @@ final class CustomerCopilotEngine {
             guard let self else { return }
             await self.runProgressiveRequest(
                 request,
-                provider: self.codexProvider,
-                providerKind: .codexSubscription,
-                credential: nil,
+                provider: provider,
+                providerKind: providerKind,
+                credential: providerKind == .codexSubscription ? nil : self.apiCredentialProvider(),
                 isFallback: true,
                 context: context,
                 startedAt: startedAt,
                 fallbackRequest: nil
             )
         }
+    }
+
+    /// Clears the session-level fallback lock when Spark/fallback also fails before
+    /// producing a visible entry, so later retries can use the user-selected model.
+    private func restorePrimaryAnswerModelAfterFallbackFailure(failedFallbackModel: String) {
+        guard isUsingFallbackAnswerModelForSession else { return }
+        isUsingFallbackAnswerModelForSession = false
+        isUsingSlowFallback = false
+        // Keep the failed fallback in diagnostics, but do not leave the session pinned.
+        if !answerAttemptedModels.contains(failedFallbackModel) {
+            answerAttemptedModels.append(failedFallbackModel)
+        }
+        Log.suggestionEngine.info(
+            "Fallback model failed before visible entry; unlocking session primary model after \(failedFallbackModel, privacy: .public)"
+        )
     }
 
     private func applyProgressiveAnswerProgress(
@@ -2119,9 +2560,9 @@ final class CustomerCopilotEngine {
     ) {
         guard OpenAIResponsesProvider.hasValidProgressiveAnswerShape(raw) else {
             // Let the request runner classify this as a failed attempt. A
-            // Terra response that never produced a usable entry may still
-            // switch this interview to Spark; the final Spark failure, if any,
-            // is surfaced by the same runner.
+            // A response that never produces a usable entry may still switch
+            // this interview to its configured fallback; the final fallback
+            // failure, if any, is surfaced by the same runner.
             return
         }
         applyProgressiveAnswerProgress(
@@ -2256,20 +2697,21 @@ final class CustomerCopilotEngine {
         knowledge: KnowledgePackageSnapshot?
     ) -> InterviewAnswerEntry? {
         let text = entry.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty,
-              let ids = validatedUnitCitations(
-                text: text,
-                claimType: entry.claimType,
-                sourceIDs: entry.sourceIDs,
-                knowledge: knowledge
-              ) else { return nil }
+        guard !text.isEmpty else { return nil }
+        let validated = validatedCitations(
+            text: text,
+            claimType: entry.claimType,
+            sourceIDs: entry.sourceIDs,
+            knowledge: knowledge
+        )
+        guard let validated else { return nil }
         let assumption = entry.assumption?.trimmingCharacters(in: .whitespacesAndNewlines)
         return InterviewAnswerEntry(
             mode: entry.mode,
             text: text,
             assumption: assumption?.isEmpty == false ? assumption : nil,
-            claimType: entry.claimType,
-            sourceIDs: ids
+            claimType: validated.claimType,
+            sourceIDs: validated.ids
         )
     }
 
@@ -2281,17 +2723,17 @@ final class CustomerCopilotEngine {
         let label = point.label.trimmingCharacters(in: .whitespacesAndNewlines)
         let cue = point.cue?.trimmingCharacters(in: .whitespacesAndNewlines)
         let validationText = [label, cue].compactMap { $0 }.joined(separator: " ")
-        guard !id.isEmpty, !label.isEmpty,
-              let ids = validatedUnitCitations(
-                text: validationText,
-                claimType: point.claimType,
-                sourceIDs: point.sourceIDs,
-                knowledge: knowledge
-              ) else { return nil }
+        guard !id.isEmpty, !label.isEmpty else { return nil }
+        guard let validated = validatedCitations(
+            text: validationText,
+            claimType: point.claimType,
+            sourceIDs: point.sourceIDs,
+            knowledge: knowledge
+        ) else { return nil }
         return InterviewAnswerSpinePoint(
             id: id, role: point.role, label: label,
             cue: cue?.isEmpty == false ? cue : nil,
-            claimType: point.claimType, sourceIDs: ids
+            claimType: validated.claimType, sourceIDs: validated.ids
         )
     }
 
@@ -2301,15 +2743,15 @@ final class CustomerCopilotEngine {
     ) -> InterviewAnswerSegment? {
         let pointID = segment.pointID.trimmingCharacters(in: .whitespacesAndNewlines)
         let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !pointID.isEmpty, !text.isEmpty,
-              let ids = validatedUnitCitations(
-                text: text,
-                claimType: segment.claimType,
-                sourceIDs: segment.sourceIDs,
-                knowledge: knowledge
-              ) else { return nil }
+        guard !pointID.isEmpty, !text.isEmpty else { return nil }
+        guard let validated = validatedCitations(
+            text: text,
+            claimType: segment.claimType,
+            sourceIDs: segment.sourceIDs,
+            knowledge: knowledge
+        ) else { return nil }
         return InterviewAnswerSegment(
-            pointID: pointID, text: text, claimType: segment.claimType, sourceIDs: ids
+            pointID: pointID, text: text, claimType: validated.claimType, sourceIDs: validated.ids
         )
     }
 
@@ -2318,30 +2760,45 @@ final class CustomerCopilotEngine {
         knowledge: KnowledgePackageSnapshot?
     ) -> InterviewAnswerClosing? {
         let text = closing.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty,
-              let ids = validatedUnitCitations(
-                text: text,
-                claimType: closing.claimType,
-                sourceIDs: closing.sourceIDs,
-                knowledge: knowledge
-              ) else { return nil }
-        return InterviewAnswerClosing(text: text, claimType: closing.claimType, sourceIDs: ids)
+        guard !text.isEmpty else { return nil }
+        guard let validated = validatedCitations(
+            text: text,
+            claimType: closing.claimType,
+            sourceIDs: closing.sourceIDs,
+            knowledge: knowledge
+        ) else { return nil }
+        return InterviewAnswerClosing(
+            text: text,
+            claimType: validated.claimType,
+            sourceIDs: validated.ids
+        )
     }
 
-    private func validatedUnitCitations(
+    private func validatedCitations(
         text: String,
         claimType: InterviewAnswerClaimType,
         sourceIDs: [String],
         knowledge: KnowledgePackageSnapshot?
-    ) -> [String]? {
+    ) -> (ids: [String], claimType: InterviewAnswerClaimType)? {
         let validCandidateIDs = knowledge?.candidateFactCitationIDs ?? []
         let normalized = sourceIDs.compactMap {
             Self.normalizedCitation($0, validIDs: validCandidateIDs)
         }
         let ids = Array(Set(normalized)).sorted()
-        if claimType == .candidateFact, ids.isEmpty { return nil }
+        if claimType == .candidateFact {
+            guard !ids.isEmpty else {
+                // DeepSeek and other json_object providers frequently label
+                // every unit candidateFact even when no resume/story-bank
+                // evidence is available. Generic methodology is safe as
+                // professional judgment; only explicit personal-history claims
+                // without a valid source must be rejected.
+                if Self.appearsToClaimCandidateHistory(text) { return nil }
+                return ([], .professionalJudgment)
+            }
+            return (ids, .candidateFact)
+        }
         if ids.isEmpty, Self.appearsToClaimCandidateHistory(text) { return nil }
-        return ids
+        return (ids, claimType)
     }
 
     private func legacyReferenceAnswer(from answer: InterviewProgressiveAnswer) -> InterviewReferenceAnswer {
@@ -2380,6 +2837,7 @@ final class CustomerCopilotEngine {
         cue: InterviewCue,
         policy: ReferenceProviderPolicy
     ) {
+        synchronizeInferencePreferenceWithSettings()
         guard context.turnID == currentGenerationTurnID,
               context.turnRevision == currentGenerationTurnRevision,
               !context.question.isEmpty else { return }
@@ -2400,14 +2858,14 @@ final class CustomerCopilotEngine {
                     provider: provider,
                     model: model,
                     startedAt: startedAt,
-                    message: "未配置 OpenAI API key，完整回答未生成。"
+                    message: "未配置 API key，完整回答未生成。"
                 )
                 return
             }
             credential = key
         case .codexOnly:
             provider = .codexSubscription
-            model = referenceAnswerModel
+            model = codexMainModel
             credential = nil
         }
 
@@ -2444,7 +2902,10 @@ final class CustomerCopilotEngine {
             prompt: prepared.text,
             cacheKnowledgeHash: prepared.cacheKnowledgeHash,
             kind: .referenceAnswer,
-            model: model
+            model: model,
+            reasoningEffort: provider == .codexSubscription
+                ? settings.interviewCodexReasoningEffort
+                : nil
         )
         referenceTask?.cancel()
         referenceAnswer = nil
@@ -2747,7 +3208,8 @@ final class CustomerCopilotEngine {
             prompt: prepared.text,
             cacheKnowledgeHash: prepared.cacheKnowledgeHash,
             kind: .followUps,
-            model: referenceAnswerModel
+            model: model(for: policy),
+            reasoningEffort: reasoningEffort(for: policy)
         )
         let startedAt = Date()
         let credential = policy == .apiOnly ? apiCredentialProvider() : nil
@@ -2872,7 +3334,8 @@ final class CustomerCopilotEngine {
             prompt: prepared.text,
             cacheKnowledgeHash: prepared.cacheKnowledgeHash,
             kind: .followUpAnswer,
-            model: referenceAnswerModel
+            model: model(for: policy),
+            reasoningEffort: reasoningEffort(for: policy)
         )
         let startedAt = Date()
         let credential = policy == .apiOnly ? apiCredentialProvider() : nil
@@ -3336,7 +3799,7 @@ final class CustomerCopilotEngine {
             let persistedModel: String
             switch activeProvider {
             case .openAIRealtime: persistedModel = realtimeModel
-            case .openAIAPI: persistedModel = apiModel
+            case .openAIAPI, .deepSeekAPI: persistedModel = activeAPIModel
             default: persistedModel = codexModel
             }
             let request = InterviewGenerationRequest(
@@ -3447,7 +3910,7 @@ final class CustomerCopilotEngine {
         case .followUps:
             "基于当前问题和已生成的完整回答，预测恰好 3 个最可能、彼此不同的面试官追问。question 要像面试官会直接说出的话；intent 用一句短句说明考察点。此阶段不要回答追问。"
         case .followUpAnswer:
-            "只回答 SELECTED_FOLLOW_UP。directOpening 直接给结论；talkingPoints 为 2 到 3 条扫读要点；sampleAnswer 是可说 20 到 40 秒的示例回答。没有个人事实时用方法论和假设式表达，不能拒答。"
+            "只回答 SELECTED_FOLLOW_UP。先生成一条唯一的作答主线：directOpening 直接给结论；talkingPoints 为 2 到 3 条扫读要点。sampleAnswer 是这条主线的可说 20 到 40 秒展开稿，必须依次覆盖 directOpening 和 talkingPoints，不能引入新的结论、事实、数字、案例或不同的作答路径。没有个人事实时用方法论和假设式表达，不能拒答。"
         }
         let candidateContextPolicy = settings.interviewIncludeCandidateAnswersInContext
             ? "候选人转写来自 ASR，可能存在错字、同音词和专有名词错误。它只能帮助理解追问和避免重复；其中的人名、公司、项目、数字、任职和成果都不能作为事实依据。候选人个人事实仍只能来自 resume 或 story-bank。"
@@ -3887,7 +4350,8 @@ final class CustomerCopilotEngine {
             prompt: prepared.text,
             cacheKnowledgeHash: prepared.cacheKnowledgeHash,
             kind: .followUps,
-            model: referenceAnswerModel
+            model: model(for: policy),
+            reasoningEffort: reasoningEffort(for: policy)
         )
         let raw: InterviewFollowUpSet = switch policy {
         case .apiOnly:
@@ -3920,7 +4384,8 @@ final class CustomerCopilotEngine {
             prompt: prepared.text,
             cacheKnowledgeHash: prepared.cacheKnowledgeHash,
             kind: .followUpAnswer,
-            model: referenceAnswerModel
+            model: model(for: policy),
+            reasoningEffort: reasoningEffort(for: policy)
         )
         let raw: InterviewFollowUpAnswer = switch policy {
         case .apiOnly:
@@ -4116,9 +4581,9 @@ final class CustomerCopilotEngine {
         }
         let attempted = answerAttemptedModels.isEmpty ? [request.model] : answerAttemptedModels
         let fallbackReason: String? = if attempted.count > 1 {
-            "Terra request failed before a usable entry; switched interview session to Spark"
+            "\(attempted[0]) 在可用首句前失败；本场已切换到 \(attempted.last ?? fallbackAnswerModel)"
         } else if isUsingFallbackAnswerModelForSession {
-            "Interview session remains on Spark after an earlier Terra failure"
+            "本场后续继续使用 \(fallbackAnswerModel)"
         } else {
             nil
         }

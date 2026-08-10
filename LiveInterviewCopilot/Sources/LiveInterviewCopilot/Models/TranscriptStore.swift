@@ -90,6 +90,25 @@ final class TranscriptStore {
         utterances[index] = utterances[index].withCleanup(text: cleanedText, status: status)
     }
 
+    /// Overwrite one utterance's displayed text while preserving speaker/timestamp/id.
+    /// Used when the user corrects interviewer ASR for the active question turn.
+    @discardableResult
+    func rewriteDisplayText(id: UUID, text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let index = utterances.firstIndex(where: { $0.id == id }) else { return false }
+        let current = utterances[index]
+        utterances[index] = current.withRewrittenText(trimmed)
+        return true
+    }
+
+    @discardableResult
+    func removeUtterance(id: UUID) -> Bool {
+        guard let index = utterances.firstIndex(where: { $0.id == id }) else { return false }
+        utterances.remove(at: index)
+        return true
+    }
+
     func clear() {
         utterances.removeAll()
         volatileYouText = ""

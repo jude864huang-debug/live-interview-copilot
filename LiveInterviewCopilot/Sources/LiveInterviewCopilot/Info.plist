@@ -7,23 +7,23 @@
     <key>CFBundleDisplayName</key>
     <string>Live Interview Copilot</string>
     <key>CFBundleIdentifier</key>
-    <string>com.jude864huang.liveinterviewcopilot.app</string>
+    <string>com.openoats.app</string>
     <key>CFBundleVersion</key>
-    <string>1.22.0</string>
+    <string>1.84.16</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.22.0</string>
+    <string>1.84.16</string>
     <key>CFBundleExecutable</key>
-    <string>LiveInterviewCopilot</string>
+    <string>OpenOats</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>
             <key>CFBundleURLName</key>
-            <string>com.jude864huang.liveinterviewcopilot.app</string>
+            <string>com.openoats.app</string>
             <key>CFBundleURLSchemes</key>
             <array>
-                <string>liveinterviewcopilot</string>
+                <string>openoats</string>
             </array>
         </dict>
     </array>
@@ -32,9 +32,9 @@
     <key>LSMinimumSystemVersion</key>
     <string>15.0</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Live Interview Copilot needs microphone access to transcribe your voice during interviews.</string>
+    <string>OpenOats needs microphone access to transcribe your voice during interviews.</string>
     <key>NSAudioCaptureUsageDescription</key>
-    <string>Live Interview Copilot needs system-audio recording access to transcribe interviewers in real time.</string>
+    <string>OpenOats needs system-audio recording access to transcribe interviewers in real time.</string>
     <key>NSCalendarsFullAccessUsageDescription</key>
     <string>Live Interview Copilot can use your calendar to title interview sessions with the event name and participant information.</string>
     <key>NSAppleEventsUsageDescription</key>

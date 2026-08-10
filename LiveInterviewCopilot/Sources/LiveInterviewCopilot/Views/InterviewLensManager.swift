@@ -25,7 +25,9 @@ final class InterviewLensManager {
     var displayTitle: String {
         guard let selection = activeSelection else { return "镜头卡" }
         let contentTitle: String
-        if selection == .referenceAnswer,
+        if state.currentPage?.items.first?.unitID.hasSuffix(".script") == true {
+            contentTitle = "口述稿（20–40 秒）"
+        } else if selection == .referenceAnswer,
            let unitID = state.currentPage?.items.first?.unitID,
            let suffix = unitID.split(separator: ".").last,
            let index = Int(suffix) {
@@ -632,17 +634,13 @@ private struct InterviewLensCardView: View {
             pageFooter
         }
         .background {
-            ZStack {
-                Rectangle().fill(.regularMaterial)
-                Rectangle().fill(
-                    Color(nsColor: .windowBackgroundColor)
-                        .opacity(
-                            reduceTransparency || colorSchemeContrast == .increased
-                                ? 1
-                                : 0.93
-                        )
-                )
-            }
+            // The NSPanel itself is transparent. Avoid stacking an opaque
+            // material over it: that looked like a regular solid window even
+            // though transparency was technically enabled.
+            Rectangle().fill(
+                Color(nsColor: .windowBackgroundColor)
+                    .opacity(reduceTransparency || colorSchemeContrast == .increased ? 1 : 0.76)
+            )
         }
         .overlay {
             RoundedRectangle(cornerRadius: 10)
@@ -838,8 +836,8 @@ private struct InterviewLensCardView: View {
             }
             .buttonStyle(.plain)
             .disabled(!manager.canNavigateNext)
-            .help("下一项或下一页 · →")
-            .accessibilityLabel("下一项或下一页")
+            .help(nextNavigationHint)
+            .accessibilityLabel(nextNavigationHint)
             .accessibilityIdentifier("copilot.interviewLens.next")
 
             if state.currentPage?.overflow != nil {
@@ -851,7 +849,7 @@ private struct InterviewLensCardView: View {
 
             Spacer(minLength: 4)
 
-            Text("切换内容 · ← / →")
+            Text(footerNavigationHint)
                 .font(.system(size: 9, design: .monospaced))
                 .foregroundStyle(.tertiary)
         }
@@ -867,6 +865,22 @@ private struct InterviewLensCardView: View {
     private var pageCounterAccessibilityLabel: String {
         guard !state.pages.isEmpty else { return "暂无分页内容" }
         return "第 \(state.pageIndex + 1) 页，共 \(state.pages.count) 页"
+    }
+
+    private var nextNavigationHint: String {
+        isOnFollowUpCuePage ? "展开口述稿 · →" : "下一项或下一页 · →"
+    }
+
+    private var footerNavigationHint: String {
+        isOnFollowUpCuePage ? "展开口述稿 · →" : "切换内容 · ← / →"
+    }
+
+    private var isOnFollowUpCuePage: Bool {
+        guard let page = state.currentPage,
+              page.continuation.continuesUnitOnNextPage == false,
+              page.items.count == 1,
+              let item = page.items.first else { return false }
+        return item.kind == .followUpAnswer && item.unitID.hasSuffix(".cue")
     }
 
     private var emptyStateLabel: String {

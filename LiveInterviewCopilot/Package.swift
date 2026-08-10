@@ -1,5 +1,6 @@
 // swift-tools-version: 6.2
 
+import Foundation
 import PackageDescription
 
 let package = Package(
@@ -56,10 +57,38 @@ let package = Package(
             ],
             path: "Sources/Benchmark"
         ),
+    ]
+)
+
+// CLT-only progressive regression harness. Keep it out of default package
+// builds so release packaging is not forced to compile with -enable-testing.
+if ProcessInfo.processInfo.environment["ENABLE_CLT_VERIFY"] == "1" {
+    package.targets.append(
+        .executableTarget(
+            name: "CLTProgressiveVerify",
+            dependencies: ["LiveInterviewCopilotKit"],
+            path: "Tools/CLTProgressiveVerify"
+        )
+    )
+}
+
+private func hasUsableXCTest() -> Bool {
+    let candidates = [
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks/XCTest.framework",
+        "/Applications/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks/XCTest.framework",
+    ]
+    if ProcessInfo.processInfo.environment["FORCE_CLT_TESTS_ONLY"] == "1" {
+        return false
+    }
+    return candidates.contains { FileManager.default.fileExists(atPath: $0) }
+}
+
+if hasUsableXCTest() {
+    package.targets.append(
         .testTarget(
             name: "LiveInterviewCopilotTests",
             dependencies: ["LiveInterviewCopilotKit"],
             path: "Tests/LiveInterviewCopilotTests"
-        ),
-    ]
-)
+        )
+    )
+}

@@ -16,6 +16,7 @@ struct HomeTimelineWorkspaceView: View {
     @State private var creatingFolderForSessionID: String?
     @State private var newFolderPath = ""
     @State private var newFolderColor: NotesFolderColor = .orange
+    @State private var sessionPendingDeletion: SessionIndex?
     @FocusState private var newFolderFieldFocused: Bool
 
     var body: some View {
@@ -65,6 +66,27 @@ struct HomeTimelineWorkspaceView: View {
             Task {
                 _ = await handleRequestedHomeNavigation(controller: controller)
             }
+        }
+        .onDeleteCommand {
+            requestDeletionForSelectedSession()
+        }
+        .alert(
+            "删除这条历史记录？",
+            isPresented: Binding(
+                get: { sessionPendingDeletion != nil },
+                set: { if !$0 { sessionPendingDeletion = nil } }
+            ),
+            presenting: sessionPendingDeletion
+        ) { session in
+            Button("删除", role: .destructive) {
+                delete(session)
+            }
+            Button("取消", role: .cancel) {
+                sessionPendingDeletion = nil
+            }
+        } message: { session in
+            let title = session.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            Text("“\(title.isEmpty ? "未命名面试" : title)”的转写、笔记和本地录音将被永久删除，且无法恢复。")
         }
         .sheet(
             isPresented: Binding(
@@ -169,7 +191,10 @@ struct HomeTimelineWorkspaceView: View {
                                 onSelect: { entry in
                                     select(entry, controller: controller)
                                 },
-                                onJoinEvent: joinMeeting(for:)
+                                onJoinEvent: joinMeeting(for:),
+                                onRequestDelete: { session in
+                                    sessionPendingDeletion = session
+                                }
                             )
                         }
                     }
@@ -204,6 +229,21 @@ struct HomeTimelineWorkspaceView: View {
                     .accessibilityIdentifier("home.detailPane")
 
                 Spacer()
+
+                if !controller.state.availableAudioSources.isEmpty {
+                    Button {
+                        controller.toggleAudioPlayback()
+                    } label: {
+                        Label(
+                            controller.state.isPlayingAudio ? "暂停录音" : "播放录音",
+                            systemImage: controller.state.isPlayingAudio ? "pause.fill" : "play.fill"
+                        )
+                        .font(.system(size: 12, weight: .medium))
+                    }
+                    .buttonStyle(.bordered)
+                    .help("播放本场面试录音")
+                    .accessibilityIdentifier("home.detail.audioPlayback")
+                }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
@@ -305,6 +345,25 @@ struct HomeTimelineWorkspaceView: View {
         selectedEntryID = nil
         controller.selectSession(nil)
         resizeMainWindow(detailVisible: false)
+    }
+
+    private func requestDeletionForSelectedSession() {
+        guard let selectedEntryID,
+              selectedEntryID.hasPrefix("session:"),
+              let sessionID = selectedEntryID.split(separator: ":", maxSplits: 1).last.map(String.init),
+              let session = notesController?.state.sessionHistory.first(where: { $0.id == sessionID }) else {
+            return
+        }
+        sessionPendingDeletion = session
+    }
+
+    private func delete(_ session: SessionIndex) {
+        guard let controller = notesController else { return }
+        if selectedEntryID == "session:\(session.id)" {
+            collapseDetail(controller: controller)
+        }
+        sessionPendingDeletion = nil
+        controller.deleteSession(sessionID: session.id)
     }
 
     @MainActor
@@ -681,6 +740,7 @@ private struct HomeTimelineDayGroupView: View {
     let sessionHistory: [SessionIndex]
     let onSelect: (HomeTimelineEntry) -> Void
     let onJoinEvent: (CalendarEvent) -> Void
+    let onRequestDelete: (SessionIndex) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -699,7 +759,8 @@ private struct HomeTimelineDayGroupView: View {
                         settings: settings,
                         sessionHistory: sessionHistory,
                         onSelect: { onSelect(entry) },
-                        onJoinEvent: onJoinEvent
+                        onJoinEvent: onJoinEvent,
+                        onRequestDelete: onRequestDelete
                     )
                 }
             }
@@ -716,6 +777,7 @@ private struct HomeTimelineEntryRow: View {
     let sessionHistory: [SessionIndex]
     let onSelect: () -> Void
     let onJoinEvent: (CalendarEvent) -> Void
+    let onRequestDelete: (SessionIndex) -> Void
 
     @State private var isHovering = false
 
@@ -769,6 +831,26 @@ private struct HomeTimelineEntryRow: View {
                 .buttonStyle(.plain)
                 .help("Join meeting")
                 .accessibilityIdentifier("home.timeline.join.\(event.id)")
+            }
+
+            if case .savedSession(let session) = entry, isSelected || isHovering {
+                Button(role: .destructive) {
+                    onRequestDelete(session)
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .help("删除记录")
+                .accessibilityIdentifier("home.timeline.delete.\(session.id)")
+            }
+        }
+        .contextMenu {
+            if case .savedSession(let session) = entry {
+                Button("删除记录", role: .destructive) {
+                    onRequestDelete(session)
+                }
             }
         }
     }

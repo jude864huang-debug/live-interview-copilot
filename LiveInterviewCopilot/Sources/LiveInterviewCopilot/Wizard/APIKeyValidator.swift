@@ -31,6 +31,45 @@ enum APIKeyValidator {
         }
     }
 
+    /// Validate a DeepSeek API key against its OpenAI-compatible models endpoint.
+    static func validateDeepSeekKey(_ key: String, baseURL: String = "https://api.deepseek.com") async -> ValidationResult {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .invalid(message: "API key 为空") }
+        let base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var components = URLComponents(string: base),
+              components.scheme?.lowercased() == "http" || components.scheme?.lowercased() == "https",
+              let host = components.host, !host.isEmpty else {
+            return .networkError(message: "DeepSeek Base URL 无效")
+        }
+
+        var path = components.path
+        while path.hasSuffix("/") {
+            path.removeLast()
+        }
+        if path.hasSuffix("/v1") {
+            path += "/models"
+        } else if path.isEmpty {
+            path = "/v1/models"
+        } else {
+            path += "/v1/models"
+        }
+        components.path = path
+        guard let url = components.url else {
+            return .networkError(message: "DeepSeek Base URL 无效")
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(trimmed)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 8
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            return validationResult(for: response, authFailureMessage: "DeepSeek API key 无效或无权访问")
+        } catch {
+            return .networkError(message: "暂时无法连接 DeepSeek API")
+        }
+    }
+
     /// Validate an ElevenLabs API key by hitting the voices endpoint.
     static func validateElevenLabsKey(_ key: String) async -> ValidationResult {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)

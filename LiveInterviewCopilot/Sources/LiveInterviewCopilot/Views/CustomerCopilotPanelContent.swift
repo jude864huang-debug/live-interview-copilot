@@ -141,8 +141,8 @@ struct CustomerCopilotPanelContent: View {
                 if engine.referenceGenerationState == .generating {
                     badge(
                         engine.isUsingFallbackAnswerModelForSession
-                            ? "Spark 主回答生成中"
-                            : "Terra 主回答生成中",
+                            ? "\(friendlyModelName(engine.activeAnswerModel)) 主回答生成中"
+                            : "\(friendlyModelName(engine.primaryAnswerModel)) 主回答生成中",
                         color: .blue
                     )
                 } else {
@@ -530,8 +530,8 @@ struct CustomerCopilotPanelContent: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(
                             engine.isUsingFallbackAnswerModelForSession
-                                ? "Terra 本场不可用，正在用 Spark 形成第一句…"
-                                : "正在用 Terra 形成第一句可直接开口的回答…"
+                                ? "\(friendlyModelName(engine.primaryAnswerModel)) 本场不可用，正在用 \(friendlyModelName(engine.activeAnswerModel)) 形成第一句…"
+                                : "正在用 \(friendlyModelName(engine.primaryAnswerModel)) 形成第一句可直接开口的回答…"
                         )
                             .font(.callout.weight(.semibold))
                         Text("半句话不会显示；首个通过引用校验的完整 entry 会锁定本轮答案。")
@@ -646,6 +646,15 @@ struct CustomerCopilotPanelContent: View {
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
                 .help(labels.joined(separator: "\n"))
+        }
+    }
+
+    private func friendlyModelName(_ model: String) -> String {
+        switch model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "gpt-5.6-terra": return "Terra"
+        case "gpt-5.6-luna": return "Luna"
+        case "gpt-5.3-codex-spark": return "Spark"
+        default: return model
         }
     }
 
@@ -1123,6 +1132,18 @@ struct CustomerCopilotPanelContent: View {
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             }
                         }
+                    }
+                    let sampleAnswer = answer.sampleAnswer.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !sampleAnswer.isEmpty {
+                        DisclosureGroup("展开口述稿（20–40 秒）") {
+                            Text(sampleAnswer)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .padding(.top, 2)
+                        }
+                        .font(.caption.weight(.medium))
+                        .accessibilityLabel("展开第 \(number) 个追问的口述稿")
                     }
                 }
                 .padding(.horizontal, 14)
@@ -1786,7 +1807,7 @@ struct InterviewWorkspaceHeader: View {
                 diagnosticRow(
                     "模型切换",
                     engine.isUsingFallbackAnswerModelForSession
-                        ? "本场后续锁定 Spark"
+                        ? "本场后续锁定 \(friendlyModelName(engine.activeAnswerModel))"
                         : (diagnostics.fallbackTriggered ? "本轮已触发" : "未触发")
                 )
             }
@@ -1947,9 +1968,12 @@ struct InterviewWorkspaceHeader: View {
     }
 
     private func friendlyModelName(_ model: String) -> String {
-        let normalized = model.lowercased()
-        if normalized.contains("terra") { return "Terra" }
-        if normalized.contains("spark") { return "Spark" }
+        switch model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "gpt-5.6-terra": return "Terra"
+        case "gpt-5.6-luna": return "Luna"
+        case "gpt-5.3-codex-spark": return "Spark"
+        default: break
+        }
         return model
     }
 
@@ -2058,40 +2082,78 @@ struct InterviewWorkspaceQuestionBar: View {
     @Bindable var engine: CustomerCopilotEngine
     @Bindable var interviewLensManager: InterviewLensManager
     @AppStorage("copilotFontSizeLevel") private var copilotFontSizeLevel = CopilotFontSize.standard.rawValue
+    @State private var keywordReplacementDraft = ""
+    @FocusState private var isFullSentenceFocused: Bool
+    @FocusState private var isKeywordInputFocused: Bool
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 7) {
-                    Label("当前问题", systemImage: "person.wave.2.fill")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    if engine.isAnswerFrozen {
-                        badge("回答中", color: .orange)
-                    }
-                    if engine.previousResultWasSuperseded {
-                        Label("已按补充重新生成", systemImage: "arrow.triangle.2.circlepath")
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 7) {
+                        Label("当前问题", systemImage: "person.wave.2.fill")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        if engine.isAnswerFrozen {
+                            badge("回答中", color: .orange)
+                        }
+                        if engine.questionWasCorrected {
+                            badge("已校正", color: .green)
+                        }
+                        if engine.previousResultWasSuperseded {
+                            Label(
+                                engine.questionWasCorrected ? "已按修正问题重新生成" : "已按补充重新生成",
+                                systemImage: "arrow.triangle.2.circlepath"
+                            )
                             .font(.caption2)
                             .foregroundStyle(.orange)
+                        }
+                        if engine.isCorrectingQuestion {
+                            badge(engine.questionCorrectionMode == .fullSentence ? "整句修改中" : "关键词校正中", color: .blue)
+                        }
+                    }
+
+                    questionBody
+                }
+
+                Spacer(minLength: 8)
+
+                HStack(spacing: 6) {
+                    if let type = engine.progressiveAnswer?.metadata.questionType
+                        ?? engine.answerProgress.metadata?.questionType {
+                        badge(type.label, color: .secondary)
+                    }
+
+                    Button {
+                        engine.beginQuestionFullSentenceCorrection()
+                        isFullSentenceFocused = true
+                    } label: {
+                        Image(systemName: "square.and.pencil")
+                            .font(.system(size: 13, weight: .semibold))
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(!engine.canCorrectCurrentQuestion)
+                    .help("整句修改：可改问题中任何部分，确定后重新生成")
+                    .accessibilityLabel("整句修改当前问题")
+                    .accessibilityIdentifier("copilot.question.fullSentenceEdit")
+
+                    if !engine.isCorrectingQuestion, engine.canCorrectCurrentQuestion {
+                        Button("校正") {
+                            engine.beginQuestionKeywordCorrection()
+                        }
+                        .buttonStyle(.borderless)
+                        .font(.caption.weight(.semibold))
+                        .help("高亮易错关键词，点击后可选手选或原位输入")
+                        .accessibilityIdentifier("copilot.question.keywordCorrect")
                     }
                 }
-                Text(displayedQuestion)
-                    .font(.callout.weight(.semibold))
-                    .lineLimit(2, reservesSpace: true)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityLabel("当前面试官问题")
-                    .accessibilityValue(displayedQuestion)
             }
 
-            Spacer(minLength: 8)
-
-            if let type = engine.progressiveAnswer?.metadata.questionType
-                ?? engine.answerProgress.metadata?.questionType {
-                badge(type.label, color: .secondary)
+            if engine.isCorrectingQuestion {
+                correctionActions
             }
-
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 10)
@@ -2099,6 +2161,198 @@ struct InterviewWorkspaceQuestionBar: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .dynamicTypeSize(selectedFontSize.dynamicTypeSize)
         .accessibilityIdentifier("copilot.currentQuestion")
+        .onChange(of: engine.activeQuestionHighlightID) { _, newValue in
+            keywordReplacementDraft = ""
+            isKeywordInputFocused = newValue != nil
+        }
+        .onChange(of: engine.questionCorrectionMode) { _, mode in
+            if mode == .fullSentence {
+                isFullSentenceFocused = true
+            }
+            if mode == .idle {
+                keywordReplacementDraft = ""
+                isKeywordInputFocused = false
+                isFullSentenceFocused = false
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var questionBody: some View {
+        switch engine.questionCorrectionMode {
+        case .idle:
+            highlightedQuestionText(interactive: false)
+                .font(.callout.weight(.semibold))
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    guard engine.canCorrectCurrentQuestion else { return }
+                    engine.beginQuestionKeywordCorrection()
+                }
+                .accessibilityLabel("当前面试官问题")
+                .accessibilityValue(displayedQuestion)
+
+        case .keyword:
+            VStack(alignment: .leading, spacing: 8) {
+                highlightedQuestionText(interactive: true)
+                    .font(.callout.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                if let active = activeHighlight {
+                    keywordEditor(for: active)
+                } else {
+                    Text("点高亮关键词可原位替换；也可点右侧铅笔做整句修改。")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+        case .fullSentence:
+            VStack(alignment: .leading, spacing: 6) {
+                TextField("编辑完整问题", text: fullSentenceBinding, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.callout.weight(.semibold))
+                    .lineLimit(2...4)
+                    .focused($isFullSentenceFocused)
+                    .padding(8)
+                    .background(Color.primary.opacity(0.04))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.accentColor.opacity(0.35), lineWidth: 1)
+                    )
+                    .onSubmit {
+                        engine.applyCorrectedQuestionAndRegenerate()
+                    }
+                    .accessibilityIdentifier("copilot.question.fullSentenceField")
+
+                Text("可改句子中任何部分。确定后按修正问题重新生成。")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var correctionActions: some View {
+        HStack(spacing: 8) {
+            Button("确定并重新生成") {
+                engine.applyCorrectedQuestionAndRegenerate()
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .disabled(engine.questionCorrectionDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .accessibilityIdentifier("copilot.question.applyCorrection")
+
+            Button("取消") {
+                engine.cancelQuestionCorrection()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .accessibilityIdentifier("copilot.question.cancelCorrection")
+
+            Spacer()
+
+            if engine.questionCorrectionHasChanges {
+                Text("已修改，确认后会替换当前回答")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+        }
+    }
+
+    private func keywordEditor(for highlight: QuestionRiskHighlight) -> some View {
+        // Candidates stay near the active in-place input; the input itself is
+        // rendered inside the highlighted sentence span.
+        VStack(alignment: .leading, spacing: 6) {
+            if !highlight.candidates.isEmpty {
+                HStack(spacing: 6) {
+                    Text("候选")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    ForEach(highlight.candidates, id: \.self) { candidate in
+                        Button(candidate) {
+                            keywordReplacementDraft = ""
+                            engine.replaceQuestionHighlight(id: highlight.id, with: candidate)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                    }
+                    Button("收起") {
+                        engine.selectQuestionHighlight(nil)
+                        keywordReplacementDraft = ""
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                }
+            } else {
+                HStack(spacing: 8) {
+                    Text("无可靠候选，在高亮位置直接输入后按 Return 替换")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Button("收起") {
+                        engine.selectQuestionHighlight(nil)
+                        keywordReplacementDraft = ""
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                }
+            }
+        }
+    }
+
+    private func commitKeywordReplacement(_ highlight: QuestionRiskHighlight) {
+        let value = keywordReplacementDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Empty input keeps original word (placeholder-only interaction).
+        engine.replaceQuestionHighlight(id: highlight.id, with: value)
+        keywordReplacementDraft = ""
+    }
+
+    @ViewBuilder
+    private func highlightedQuestionText(interactive: Bool) -> some View {
+        let text = interactive ? engine.questionCorrectionDraft : displayedQuestion
+        let highlights = engine.questionRiskHighlights
+        if text == "等待面试官提问…" {
+            Text(text).foregroundStyle(.secondary)
+        } else {
+            questionSegmentsView(text: text, highlights: highlights, interactive: interactive)
+        }
+    }
+
+    private func questionSegmentsView(
+        text: String,
+        highlights: [QuestionRiskHighlight],
+        interactive: Bool
+    ) -> some View {
+        let segments = Self.makeSegments(text: text, highlights: highlights)
+        return FlowQuestionSegments(
+            segments: segments,
+            activeID: engine.activeQuestionHighlightID,
+            interactive: interactive,
+            replacementDraft: $keywordReplacementDraft,
+            isInputFocused: $isKeywordInputFocused,
+            onSelect: { highlight in
+                keywordReplacementDraft = ""
+                engine.selectQuestionHighlight(highlight.id)
+            },
+            onSubmitReplacement: { highlight in
+                commitKeywordReplacement(highlight)
+            }
+        )
+    }
+
+    private var activeHighlight: QuestionRiskHighlight? {
+        guard let id = engine.activeQuestionHighlightID else { return nil }
+        return engine.questionRiskHighlights.first(where: { $0.id == id })
+    }
+
+    private var fullSentenceBinding: Binding<String> {
+        Binding(
+            get: { engine.questionCorrectionDraft },
+            set: { engine.updateQuestionCorrectionDraft($0) }
+        )
     }
 
     private func badge(_ text: String, color: Color) -> some View {
@@ -2122,6 +2376,193 @@ struct InterviewWorkspaceQuestionBar: View {
 
     private var selectedFontSize: CopilotFontSize {
         CopilotFontSize(rawValue: copilotFontSizeLevel) ?? .standard
+    }
+
+    private static func makeSegments(
+        text: String,
+        highlights: [QuestionRiskHighlight]
+    ) -> [QuestionTextSegment] {
+        let ordered = highlights.sorted {
+            ($0.utf16Range.location, -$0.utf16Range.length) < ($1.utf16Range.location, -$1.utf16Range.length)
+        }
+        var segments: [QuestionTextSegment] = []
+        var cursor = text.startIndex
+        let ns = text as NSString
+
+        for highlight in ordered {
+            guard highlight.utf16Range.location != NSNotFound,
+                  NSMaxRange(highlight.utf16Range) <= ns.length,
+                  let range = Range(highlight.utf16Range, in: text),
+                  range.lowerBound >= cursor else { continue }
+            if cursor < range.lowerBound {
+                segments.append(.plain(String(text[cursor..<range.lowerBound])))
+            }
+            segments.append(.highlight(highlight))
+            cursor = range.upperBound
+        }
+        if cursor < text.endIndex {
+            segments.append(.plain(String(text[cursor...])))
+        }
+        if segments.isEmpty {
+            segments = [.plain(text)]
+        }
+        return segments
+    }
+}
+
+private enum QuestionTextSegment: Identifiable {
+    case plain(String)
+    case highlight(QuestionRiskHighlight)
+
+    var id: String {
+        switch self {
+        case .plain(let text): "p-\(text.hashValue)"
+        case .highlight(let item): "h-\(item.id.uuidString)"
+        }
+    }
+}
+
+/// Lightweight wrapping layout for continuous sentence segments.
+private struct FlowQuestionSegments: View {
+    let segments: [QuestionTextSegment]
+    let activeID: UUID?
+    let interactive: Bool
+    @Binding var replacementDraft: String
+    var isInputFocused: FocusState<Bool>.Binding
+    let onSelect: (QuestionRiskHighlight) -> Void
+    let onSubmitReplacement: (QuestionRiskHighlight) -> Void
+
+    var body: some View {
+        FlexibleQuestionLine(
+            segments: segments,
+            activeID: activeID,
+            interactive: interactive,
+            replacementDraft: $replacementDraft,
+            isInputFocused: isInputFocused,
+            onSelect: onSelect,
+            onSubmitReplacement: onSubmitReplacement
+        )
+    }
+}
+
+private struct FlexibleQuestionLine: View {
+    let segments: [QuestionTextSegment]
+    let activeID: UUID?
+    let interactive: Bool
+    @Binding var replacementDraft: String
+    var isInputFocused: FocusState<Bool>.Binding
+    let onSelect: (QuestionRiskHighlight) -> Void
+    let onSubmitReplacement: (QuestionRiskHighlight) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            QuestionWrapLayout(spacing: 0) {
+                ForEach(segments) { segment in
+                    switch segment {
+                    case .plain(let text):
+                        Text(text)
+                            .font(.callout.weight(.semibold))
+                            .foregroundStyle(.primary)
+                    case .highlight(let item):
+                        if interactive, activeID == item.id {
+                            // In-place empty input; original word is grey placeholder only.
+                            TextField(
+                                "",
+                                text: $replacementDraft,
+                                prompt: Text(item.text).foregroundStyle(.secondary)
+                            )
+                            .textFieldStyle(.plain)
+                            .font(.callout.weight(.semibold))
+                            .focused(isInputFocused)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .frame(minWidth: max(28, CGFloat(item.text.count) * 14))
+                            .background(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(Color.accentColor.opacity(0.10))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .stroke(Color.accentColor.opacity(0.8), lineWidth: 1)
+                            )
+                            .onSubmit { onSubmitReplacement(item) }
+                        } else if interactive {
+                            Button {
+                                onSelect(item)
+                            } label: {
+                                Text(item.text)
+                                    .font(.callout.weight(.semibold))
+                                    .padding(.horizontal, 3)
+                                    .padding(.vertical, 1)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 4)
+                                            .fill(Color.accentColor.opacity(0.12))
+                                    )
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 4)
+                                            .stroke(Color.accentColor.opacity(0.35), lineWidth: 1)
+                                    )
+                                    .foregroundStyle(Color.accentColor)
+                            }
+                            .buttonStyle(.plain)
+                            .help(item.candidates.isEmpty ? "点击后输入替换" : "点击后选择候选或输入替换")
+                        } else {
+                            Text(item.text)
+                                .font(.callout.weight(.semibold))
+                                .padding(.horizontal, 2)
+                                .background(Color.accentColor.opacity(0.10))
+                                .foregroundStyle(Color.accentColor)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct QuestionWrapLayout: Layout {
+    var spacing: CGFloat = 0
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var width: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x + size.width > maxWidth, x > 0 {
+                y += rowHeight + spacing
+                x = 0
+                rowHeight = 0
+            }
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+            width = max(width, x)
+        }
+        return CGSize(width: width, height: y + rowHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX
+        var y = bounds.minY
+        var rowHeight: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x + size.width > bounds.maxX, x > bounds.minX {
+                y += rowHeight + spacing
+                x = bounds.minX
+                rowHeight = 0
+            }
+            subview.place(
+                at: CGPoint(x: x, y: y),
+                proposal: ProposedViewSize(width: size.width, height: size.height)
+            )
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+        }
     }
 }
 
@@ -2264,20 +2705,57 @@ struct InterviewWorkspaceActionBar: View {
     }
 
     private func regenerateButton(compact: Bool) -> some View {
-        Button {
-            engine.regenerateCurrentAnswer()
-        } label: {
-            Label("重新生成", systemImage: "arrow.clockwise")
-                .lineLimit(1)
-                .minimumScaleFactor(0.85)
-                .frame(minWidth: compact ? 80 : 92, minHeight: 44)
-                .contentShape(Rectangle())
+        HStack(spacing: 0) {
+            Button {
+                engine.regenerateCurrentAnswer()
+            } label: {
+                Label("重新生成", systemImage: "arrow.clockwise")
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                    .frame(minWidth: compact ? 80 : 92, minHeight: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.bordered)
+            .disabled(!engine.canRegenerateCurrentAnswer)
+            .help(engine.canRegenerateCurrentAnswer ? "重新生成当前回答" : "当前没有可重新生成的回答")
+            .accessibilityLabel("重新生成当前回答")
+            .accessibilityIdentifier("copilot.actions.regenerate")
+
+            Menu {
+                Section("思考深度后重新生成") {
+                    ForEach(thinkingDepthOptions, id: \.rawValue) { effort in
+                        Button {
+                            engine.regenerateCurrentAnswer(reasoningEffort: effort)
+                        } label: {
+                            if effort == currentThinkingDepth {
+                                Label(effort.label, systemImage: "checkmark")
+                            } else {
+                                Text(effort.label)
+                            }
+                        }
+                        .disabled(!engine.canRegenerateCurrentAnswer)
+                    }
+                }
+            } label: {
+                Image(systemName: "brain.head.profile")
+                    .frame(minWidth: compact ? 34 : 40, minHeight: 44)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .buttonStyle(.bordered)
+            .disabled(!engine.canRegenerateCurrentAnswer)
+            .help("选择思考深度并按该深度重新生成；会同步更新后续配置")
+            .accessibilityLabel("选择思考深度后重新生成")
+            .accessibilityIdentifier("copilot.actions.regenerate.thinkingDepth")
         }
-        .buttonStyle(.bordered)
-        .disabled(!engine.canRegenerateCurrentAnswer)
-        .help(engine.canRegenerateCurrentAnswer ? "重新生成当前回答" : "当前没有可重新生成的回答")
-        .accessibilityLabel("重新生成当前回答")
-        .accessibilityIdentifier("copilot.actions.regenerate")
+    }
+
+    private var thinkingDepthOptions: [InterviewReasoningEffort] {
+        [.none, .low, .medium, .high, .xhigh]
+    }
+
+    private var currentThinkingDepth: InterviewReasoningEffort {
+        engine.selectedThinkingDepth
     }
 
     private func endInterviewButton(compact: Bool) -> some View {

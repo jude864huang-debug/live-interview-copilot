@@ -106,6 +106,18 @@ struct Utterance: Identifiable, Codable, Sendable, Equatable {
         )
     }
 
+    /// Replace both raw and displayed text, keeping identity metadata.
+    func withRewrittenText(_ newText: String) -> Utterance {
+        Utterance(
+            id: self.id,
+            text: newText,
+            speaker: self.speaker,
+            timestamp: self.timestamp,
+            cleanedText: nil,
+            cleanupStatus: .completed
+        )
+    }
+
     /// Private memberwise init that preserves an existing ID.
     private init(id: UUID, text: String, speaker: Speaker, timestamp: Date, cleanedText: String?, cleanupStatus: TextCleanupStatus?) {
         self.id = id

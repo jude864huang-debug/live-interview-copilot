@@ -219,35 +219,34 @@ enum InterviewLensProjector {
             }
 
         case .followUps:
-            return (engine.followUpSuggestions?.items ?? []).prefix(3).enumerated().map { index, item in
+            return (engine.followUpSuggestions?.items ?? []).prefix(3).enumerated().flatMap { index, item in
                 let question = item.question.trimmingCharacters(in: .whitespacesAndNewlines)
                 let answer = engine.followUpAnswer(for: item.question)
-                return unit(
-                    id: "follow-up.\(index)",
-                    kind: .followUpAnswer,
-                    text: detailedFollowUpText(answer) ?? "正在生成回答…",
-                    label: "追问 \(index + 1)｜\(question)",
-                    startNewPage: true
+                return followUpLensUnits(
+                    answer,
+                    idPrefix: "follow-up.\(index)",
+                    cueLabel: "追问 \(index + 1)｜\(question)",
+                    scriptLabel: "追问 \(index + 1)｜口述稿（20–40 秒）"
                 )
             }
 
         case .followUpAnswer(let question):
             let normalizedQuestion = question.trimmingCharacters(in: .whitespacesAndNewlines)
-            return [unit(
-                id: "follow-up-answer.paired",
-                kind: .followUpAnswer,
-                text: detailedFollowUpText(engine.followUpAnswer(for: question)) ?? "正在生成回答…",
-                label: normalizedQuestion,
-                startNewPage: true
-            )]
+            return followUpLensUnits(
+                engine.followUpAnswer(for: question),
+                idPrefix: "follow-up-answer.paired",
+                cueLabel: normalizedQuestion,
+                scriptLabel: "口述稿（20–40 秒）"
+            )
         }
     }
 
-    private static func detailedFollowUpText(_ answer: InterviewFollowUpAnswer?) -> String? {
+    /// The lens is a glanceable speaking aid, so it uses exactly the same
+    /// opening and numbered cues as the workspace. The longer sample script
+    /// stays an optional expansion in the workspace rather than becoming a
+    /// competing answer on the camera-adjacent card.
+    static func followUpCueText(_ answer: InterviewFollowUpAnswer?) -> String? {
         guard let answer else { return nil }
-        let sample = answer.sampleAnswer.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !sample.isEmpty { return sample }
-
         let opening = answer.directOpening.trimmingCharacters(in: .whitespacesAndNewlines)
         let points = answer.talkingPoints.prefix(4).enumerated().compactMap { index, point -> String? in
             let text = point.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -255,6 +254,36 @@ enum InterviewLensProjector {
         }
         let combined = ([opening] + points).filter { !$0.isEmpty }.joined(separator: "\n")
         return combined.isEmpty ? nil : combined
+    }
+
+    /// A follow-up occupies two consecutive lens cards: the workspace-matched
+    /// cue first, then the optional speaking script. Separating them keeps the
+    /// default glance view compact while making the right arrow a deliberate
+    /// expansion of the same answer rather than a competing alternative.
+    static func followUpLensUnits(
+        _ answer: InterviewFollowUpAnswer?,
+        idPrefix: String,
+        cueLabel: String,
+        scriptLabel: String
+    ) -> [InterviewLensSemanticUnit] {
+        var result = [unit(
+            id: "\(idPrefix).cue",
+            kind: .followUpAnswer,
+            text: followUpCueText(answer) ?? "正在生成回答…",
+            label: cueLabel,
+            startNewPage: true
+        )]
+        let script = answer?.sampleAnswer.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !script.isEmpty {
+            result.append(unit(
+                id: "\(idPrefix).script",
+                kind: .sampleAnswer,
+                text: script,
+                label: scriptLabel,
+                startNewPage: true
+            ))
+        }
+        return result
     }
 
     private static func failure(

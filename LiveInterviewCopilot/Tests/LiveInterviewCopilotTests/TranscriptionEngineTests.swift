@@ -115,6 +115,61 @@ final class TranscriptionEngineTests: XCTestCase {
         )
     }
 
+    func testSystemAudioHealthRestartsAfterNoFramesTimeout() {
+        let startedAt = Date(timeIntervalSinceReferenceDate: 1_000)
+
+        XCTAssertEqual(
+            TranscriptionEngine.systemAudioHealthAction(
+                lastFrameAt: startedAt,
+                monitoringStartedAt: startedAt,
+                now: startedAt.addingTimeInterval(6),
+                isPaused: false,
+                hasAttemptedRecovery: false
+            ),
+            .restartCapture
+        )
+    }
+
+    func testSystemAudioHealthReportsFailureAfterRecoveryStaysSilent() {
+        let startedAt = Date(timeIntervalSinceReferenceDate: 1_000)
+
+        XCTAssertEqual(
+            TranscriptionEngine.systemAudioHealthAction(
+                lastFrameAt: nil,
+                monitoringStartedAt: startedAt,
+                now: startedAt.addingTimeInterval(6),
+                isPaused: false,
+                hasAttemptedRecovery: true
+            ),
+            .showNoAudioError
+        )
+    }
+
+    func testSystemAudioHealthIgnoresRecentFramesAndPausedCapture() {
+        let startedAt = Date(timeIntervalSinceReferenceDate: 1_000)
+
+        XCTAssertEqual(
+            TranscriptionEngine.systemAudioHealthAction(
+                lastFrameAt: startedAt.addingTimeInterval(5),
+                monitoringStartedAt: startedAt,
+                now: startedAt.addingTimeInterval(6),
+                isPaused: false,
+                hasAttemptedRecovery: false
+            ),
+            .none
+        )
+        XCTAssertEqual(
+            TranscriptionEngine.systemAudioHealthAction(
+                lastFrameAt: nil,
+                monitoringStartedAt: startedAt,
+                now: startedAt.addingTimeInterval(60),
+                isPaused: true,
+                hasAttemptedRecovery: false
+            ),
+            .none
+        )
+    }
+
     // MARK: - Diarization Feed Gate
 
     func testDiarizationFeedRelayStopsAfterFirstFailure() async {

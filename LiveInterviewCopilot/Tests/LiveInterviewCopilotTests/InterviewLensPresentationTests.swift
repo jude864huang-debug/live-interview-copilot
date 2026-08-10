@@ -3,6 +3,32 @@ import XCTest
 
 @MainActor
 final class InterviewLensPresentationTests: XCTestCase {
+    func testFollowUpLensUsesWorkspaceCueInsteadOfIndependentSampleScript() {
+        let answer = InterviewFollowUpAnswer(
+            directOpening: "我会先统一指标口径。",
+            talkingPoints: ["建立唯一可信源", "让计算走确定性流程"],
+            sampleAnswer: "这是一段措辞不同的 30 秒口述稿，镜头卡不应优先显示它。",
+            sourceIDs: [],
+            estimatedSpeakingSeconds: 30
+        )
+
+        XCTAssertEqual(
+            InterviewLensProjector.followUpCueText(answer),
+            "我会先统一指标口径。\n1. 建立唯一可信源\n2. 让计算走确定性流程"
+        )
+
+        let units = InterviewLensProjector.followUpLensUnits(
+            answer,
+            idPrefix: "follow-up.1",
+            cueLabel: "追问 2｜如何避免口径漂移？",
+            scriptLabel: "追问 2｜口述稿（20–40 秒）"
+        )
+        XCTAssertEqual(units.map(\.kind), [.followUpAnswer, .sampleAnswer])
+        XCTAssertEqual(units[0].text, "我会先统一指标口径。\n1. 建立唯一可信源\n2. 让计算走确定性流程")
+        XCTAssertEqual(units[1].text, answer.sampleAnswer)
+        XCTAssertTrue(units.allSatisfy(\.startNewPage))
+    }
+
     func testAnsweringSnapshotAppliesLateContentImmediately() {
         let state = makeState()
         state.activate(.quickIdea, initialSnapshot: snapshot(text: "原始提示"))
