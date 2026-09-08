@@ -1030,6 +1030,26 @@ final class LiveSessionControllerTests: XCTestCase {
         XCTAssertFalse(plan.shouldRunRecoveryBatch)
     }
 
+    func testAudioRetentionPlanDisablesRawAudioForLocalMicrophoneInterview() {
+        let dirs = makeTempDirs()
+        let settings = makeSettings(notesDirectory: dirs.notes)
+        settings.interviewAudioMode = .manualStreamingASR
+        settings.interviewAudioSource = .localMicrophone
+        settings.transcriptionModel = .elevenLabsScribe
+        settings.saveAudioRecording = true
+        settings.enableBatchRetranscription = true
+
+        let startupPlan = LiveSessionController.audioRetentionPlan(settings: settings, utteranceCount: nil)
+        let recoveryPlan = LiveSessionController.audioRetentionPlan(settings: settings, utteranceCount: 0)
+
+        for plan in [startupPlan, recoveryPlan] {
+            XCTAssertFalse(plan.shouldStartRecorder)
+            XCTAssertFalse(plan.shouldRetainBatchAudio)
+            XCTAssertFalse(plan.shouldExportRecording)
+            XCTAssertFalse(plan.shouldRunRecoveryBatch)
+        }
+    }
+
     func testInterviewRecordingPreferenceDefaultsOnOnceAndThenRespectsUserChoice() {
         let suiteName = "com.jude864huang.liveinterviewcopilot.recording-default-tests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

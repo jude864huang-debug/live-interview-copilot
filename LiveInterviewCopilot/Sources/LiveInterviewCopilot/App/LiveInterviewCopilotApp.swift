@@ -11,7 +11,6 @@ enum LiveInterviewCopilotWindowSizing {
     static let meetingDetailPaneMinWidth: CGFloat = 700
     static let notesWorkspaceSidebarWidth: CGFloat = 250
     static let mainWindowCollapsedMinSize = CGSize(width: 520, height: 560)
-    static let mainWindowExpandedMinSize = CGSize(width: 1080, height: 560)
     static let interviewWorkspaceMinSize = CGSize(width: 860, height: 620)
     static let notesWorkspaceMinSize = CGSize(width: 980, height: 560)
 }

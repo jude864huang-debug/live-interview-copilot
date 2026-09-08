@@ -20,6 +20,13 @@ final class InterviewLensManager {
     @ObservationIgnored private var isApplyingContentDrivenFrame = false
     @ObservationIgnored private var pendingPanelResizeTask: Task<Void, Never>?
     @ObservationIgnored private var lastAppliedContentHeight: CGFloat?
+    @ObservationIgnored private var debugReceiveCount = 0
+    @ObservationIgnored private var debugLastReceiveAt: UInt64?
+    @ObservationIgnored private var debugLayoutCount = 0
+    @ObservationIgnored private var debugResizeRequestCount = 0
+    @ObservationIgnored private var debugResizeCoalescedCount = 0
+    @ObservationIgnored private var debugResizeApplyCount = 0
+    @ObservationIgnored private var lastRequestedContentHeight: CGFloat?
 
     var activeSelection: InterviewLensSelection? { state.activeSelection }
     var displayTitle: String {
@@ -112,6 +119,7 @@ final class InterviewLensManager {
         pendingPanelResizeTask = nil
         isApplyingContentDrivenFrame = false
         lastAppliedContentHeight = nil
+        lastRequestedContentHeight = nil
         panel?.orderOut(nil)
         hostingView?.rootView = AnyView(EmptyView())
         engine = nil
@@ -210,7 +218,14 @@ final class InterviewLensManager {
 
     func receive(_ projected: InterviewLensSnapshot) {
         guard isVisible else { return }
-        if case .selectionChanged(let selection) = state.receive(projected) {
+        let receiveStartedAt = TemporaryPerformanceProbe.now()
+        let receiveGapMs = debugLastReceiveAt.map {
+            Double(receiveStartedAt - $0) / 1_000_000
+        } ?? 0
+        debugLastReceiveAt = receiveStartedAt
+        debugReceiveCount += 1
+        let reception = state.receive(projected)
+        if case .selectionChanged(let selection) = reception {
             persistSelection(selection)
             if let engine {
                 state.activate(
@@ -222,7 +237,21 @@ final class InterviewLensManager {
                 )
             }
         }
-        updatePaginationForCurrentFrame()
+        switch reception {
+        case .unchanged:
+            break
+        case .contentChanged, .turnChanged, .selectionChanged:
+            updatePaginationForCurrentFrame()
+        }
+        let receiveDurationMs = TemporaryPerformanceProbe.milliseconds(since: receiveStartedAt)
+        if debugReceiveCount == 1
+            || debugReceiveCount % 50 == 0
+            || receiveGapMs >= 500
+            || receiveDurationMs >= 10 {
+            TemporaryPerformanceProbe.log(
+                "lens.receive count=\(debugReceiveCount) gap_ms=\(receiveGapMs) duration_ms=\(receiveDurationMs) selection=\(projected.selection.kind.rawValue) units=\(projected.units.count) pages=\(state.pages.count) streaming=\(projected.isStreaming) frozen=\(projected.isFrozen)"
+            )
+        }
     }
 
     func finishDragging() {
@@ -472,6 +501,8 @@ final class InterviewLensManager {
 
     private func updatePaginationForCurrentFrame(resizeToContent: Bool = true) {
         guard let settings else { return }
+        let layoutStartedAt = TemporaryPerformanceProbe.now()
+        debugLayoutCount += 1
         let size = panel?.frame.size
             ?? CGSize(
                 width: settings.interviewLensSize.width,
@@ -482,7 +513,7 @@ final class InterviewLensManager {
         } ?? NSScreen.main?.visibleFrame
             ?? NSRect(x: 0, y: 0, width: 1_440, height: 900)
         let maximumPanelHeight = InterviewLensGeometry.maximumSize(in: visibleFrame).height
-        state.updateLayout(
+        let layoutChanged = state.updateLayout(
             panelSize: size,
             fontScale: settings.interviewLensFontScale,
             maximumPanelHeight: maximumPanelHeight
@@ -490,19 +521,48 @@ final class InterviewLensManager {
         if resizeToContent {
             resizePanelToCurrentContent()
         }
+        let layoutDurationMs = TemporaryPerformanceProbe.milliseconds(since: layoutStartedAt)
+        if debugLayoutCount == 1
+            || debugLayoutCount % 50 == 0
+            || layoutDurationMs >= 10 {
+            TemporaryPerformanceProbe.log(
+                "lens.layout count=\(debugLayoutCount) duration_ms=\(layoutDurationMs) panel_w=\(size.width) panel_h=\(size.height) pages=\(state.pages.count) changed=\(layoutChanged) resize=\(resizeToContent)"
+            )
+        }
     }
 
     private func resizePanelToCurrentContent() {
+        guard let panel,
+              !panel.inLiveResize,
+              panel.screen ?? screen(containing: panel.frame) != nil else { return }
+
+        let preferredHeight = ceil(state.preferredPanelHeight)
+        guard preferredHeight.isFinite else { return }
+        guard lastRequestedContentHeight.map({ abs($0 - preferredHeight) >= 0.5 }) ?? true else {
+            return
+        }
+
+        lastRequestedContentHeight = preferredHeight
+        debugResizeRequestCount += 1
         // Coalesce to one resize per display interval. Keeping the first task
         // avoids starving the resize while model deltas arrive faster than the
         // delay; the task always reads the newest preferred height when it runs.
-        guard pendingPanelResizeTask == nil else { return }
+        guard pendingPanelResizeTask == nil else {
+            debugResizeCoalescedCount += 1
+            if debugResizeCoalescedCount == 1 || debugResizeCoalescedCount % 50 == 0 {
+                TemporaryPerformanceProbe.log(
+                    "lens.resize_coalesced requests=\(debugResizeRequestCount) coalesced=\(debugResizeCoalescedCount)"
+                )
+            }
+            return
+        }
         pendingPanelResizeTask = Task { @MainActor [weak self] in
             do {
                 // Leave SwiftUI's projection/update transaction before touching
                 // NSWindow.frame, and coalesce rapid streaming deltas.
                 try await Task.sleep(for: .milliseconds(20))
             } catch {
+                self?.pendingPanelResizeTask = nil
                 return
             }
             guard !Task.isCancelled, let self else { return }
@@ -516,9 +576,12 @@ final class InterviewLensManager {
               !panel.inLiveResize,
               !isApplyingContentDrivenFrame,
               let screen = panel.screen ?? screen(containing: panel.frame) else { return }
+        let preferredHeightStartedAt = TemporaryPerformanceProbe.now()
+        let preferredHeight = state.preferredPanelHeight
+        let preferredHeightDurationMs = TemporaryPerformanceProbe.milliseconds(since: preferredHeightStartedAt)
         let fitted = InterviewLensGeometry.contentFittedFrame(
             panel.frame,
-            preferredHeight: ceil(state.preferredPanelHeight),
+            preferredHeight: ceil(preferredHeight),
             in: screen.visibleFrame
         )
         if let lastAppliedContentHeight,
@@ -531,7 +594,18 @@ final class InterviewLensManager {
 
         isApplyingContentDrivenFrame = true
         lastAppliedContentHeight = fitted.height
+        let setFrameStartedAt = TemporaryPerformanceProbe.now()
         panel.setFrame(fitted, display: false, animate: false)
+        let setFrameDurationMs = TemporaryPerformanceProbe.milliseconds(since: setFrameStartedAt)
+        debugResizeApplyCount += 1
+        if debugResizeApplyCount == 1
+            || debugResizeApplyCount % 25 == 0
+            || preferredHeightDurationMs >= 10
+            || setFrameDurationMs >= 10 {
+            TemporaryPerformanceProbe.log(
+                "lens.resize_apply count=\(debugResizeApplyCount) preferred_h=\(preferredHeight) measure_ms=\(preferredHeightDurationMs) set_frame_ms=\(setFrameDurationMs) frame_h=\(fitted.height)"
+            )
+        }
         // setFrame may synchronously emit windowDidResize. The guard only needs
         // to cover that re-entrant callback: asynchronous callbacks merely
         // repaginate and never initiate another frame change.

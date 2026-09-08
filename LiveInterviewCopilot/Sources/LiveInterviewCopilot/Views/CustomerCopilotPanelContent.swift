@@ -405,7 +405,7 @@ struct CustomerCopilotPanelContent: View {
                 .accessibilityIdentifier("copilot.audio.pauseToggle")
                 .lineLimit(1)
                 Spacer()
-                Text("⌃⌥G")
+                Text("⌥Z")
                     .font(.caption2.monospaced())
                     .foregroundStyle(.tertiary)
             }
@@ -1647,13 +1647,15 @@ struct InterviewWorkspaceHeader: View {
             audioMeter(
                 title: "Mic",
                 level: liveSessionController.state.micAudioLevel,
-                active: !isAudioCapturePaused && !isMicMuted && engine.activeInterviewRole == .candidate,
+                active: micMeterIsActive,
                 identifier: "copilot.audio.micMeter"
             )
             audioMeter(
                 title: "System",
                 level: liveSessionController.state.systemAudioLevel,
-                active: !isAudioCapturePaused && engine.activeInterviewRole == .interviewer,
+                active: !engine.isLocalMicrophoneInterviewMode
+                    && !isAudioCapturePaused
+                    && engine.activeInterviewRole == .interviewer,
                 identifier: "copilot.audio.systemMeter"
             )
 
@@ -2015,6 +2017,12 @@ struct InterviewWorkspaceHeader: View {
 
     private var roleStatusTitle: String {
         if isAudioCapturePaused { return "收音已暂停" }
+        if engine.isLocalMicrophoneInterviewMode {
+            if engine.isFinishingExternalInterviewQuestion { return "正在完成听题" }
+            return engine.isListeningToExternalInterviewQuestion
+                ? "听面试官 · 本机麦克风"
+                : "等待开始听题"
+        }
         if isMicMuted, engine.activeInterviewRole == .candidate { return "Mic 已关闭 · 可保存" }
         return switch engine.manualTurnState {
         case .idle: "等待开始"
@@ -2029,6 +2037,9 @@ struct InterviewWorkspaceHeader: View {
 
     private var roleStatusSymbol: String {
         if isAudioCapturePaused { return "pause.fill" }
+        if engine.isLocalMicrophoneInterviewMode {
+            return engine.isFinishingExternalInterviewQuestion ? "hourglass" : "mic.fill"
+        }
         if isMicMuted, engine.activeInterviewRole == .candidate { return "mic.slash.fill" }
         return switch engine.manualTurnState {
         case .listeningInterviewer: "speaker.wave.2.fill"
@@ -2041,6 +2052,10 @@ struct InterviewWorkspaceHeader: View {
     }
 
     private var roleStatusColor: Color {
+        if engine.isLocalMicrophoneInterviewMode {
+            if isAudioCapturePaused || engine.isFinishingExternalInterviewQuestion { return .orange }
+            return engine.isListeningToExternalInterviewQuestion ? .green : .secondary
+        }
         if isAudioCapturePaused || (isMicMuted && engine.activeInterviewRole == .candidate) { return .orange }
         return switch engine.manualTurnState {
         case .listeningInterviewer, .listeningCandidate: .green
@@ -2064,6 +2079,10 @@ struct InterviewWorkspaceHeader: View {
     }
 
     private var statusColor: Color {
+        if engine.isLocalMicrophoneInterviewMode {
+            if engine.isFinishingExternalInterviewQuestion || isAudioCapturePaused { return .orange }
+            return engine.isListeningToExternalInterviewQuestion ? .green : .secondary
+        }
         if engine.manualTurnState == .failed || engine.referenceGenerationState == .failed { return .red }
         if isAudioCapturePaused || engine.referenceGenerationState == .generating { return .orange }
         return switch engine.manualTurnState {
@@ -2076,6 +2095,14 @@ struct InterviewWorkspaceHeader: View {
 
     private var isAudioCapturePaused: Bool { liveSessionController.state.isRecordingPaused }
     private var isMicMuted: Bool { liveSessionController.state.isMicMuted }
+    private var micMeterIsActive: Bool {
+        guard !isAudioCapturePaused, !isMicMuted else { return false }
+        if engine.isLocalMicrophoneInterviewMode {
+            return engine.isListeningToExternalInterviewQuestion
+                && !engine.isFinishingExternalInterviewQuestion
+        }
+        return engine.activeInterviewRole == .candidate
+    }
 }
 
 struct InterviewWorkspaceQuestionBar: View {
@@ -2118,40 +2145,42 @@ struct InterviewWorkspaceQuestionBar: View {
 
                 Spacer(minLength: 8)
 
-                HStack(spacing: 6) {
-                    if let type = engine.progressiveAnswer?.metadata.questionType
-                        ?? engine.answerProgress.metadata?.questionType {
-                        badge(type.label, color: .secondary)
-                    }
+                if !engine.isLocalMicrophoneInterviewMode {
+                    HStack(spacing: 6) {
+                        if let type = engine.progressiveAnswer?.metadata.questionType
+                            ?? engine.answerProgress.metadata?.questionType {
+                            badge(type.label, color: .secondary)
+                        }
 
-                    Button {
-                        engine.beginQuestionFullSentenceCorrection()
-                        isFullSentenceFocused = true
-                    } label: {
-                        Image(systemName: "square.and.pencil")
-                            .font(.system(size: 13, weight: .semibold))
-                            .frame(width: 28, height: 28)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.borderless)
-                    .disabled(!engine.canCorrectCurrentQuestion)
-                    .help("整句修改：可改问题中任何部分，确定后重新生成")
-                    .accessibilityLabel("整句修改当前问题")
-                    .accessibilityIdentifier("copilot.question.fullSentenceEdit")
-
-                    if !engine.isCorrectingQuestion, engine.canCorrectCurrentQuestion {
-                        Button("校正") {
-                            engine.beginQuestionKeywordCorrection()
+                        Button {
+                            engine.beginQuestionFullSentenceCorrection()
+                            isFullSentenceFocused = true
+                        } label: {
+                            Image(systemName: "square.and.pencil")
+                                .font(.system(size: 13, weight: .semibold))
+                                .frame(width: 28, height: 28)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.borderless)
-                        .font(.caption.weight(.semibold))
-                        .help("高亮易错关键词，点击后可选手选或原位输入")
-                        .accessibilityIdentifier("copilot.question.keywordCorrect")
+                        .disabled(!engine.canCorrectCurrentQuestion)
+                        .help("整句修改：可改问题中任何部分，确定后重新生成")
+                        .accessibilityLabel("整句修改当前问题")
+                        .accessibilityIdentifier("copilot.question.fullSentenceEdit")
+
+                        if !engine.isCorrectingQuestion, engine.canCorrectCurrentQuestion {
+                            Button("校正") {
+                                engine.beginQuestionKeywordCorrection()
+                            }
+                            .buttonStyle(.borderless)
+                            .font(.caption.weight(.semibold))
+                            .help("高亮易错关键词，点击后可选手选或原位输入")
+                            .accessibilityIdentifier("copilot.question.keywordCorrect")
+                        }
                     }
                 }
             }
 
-            if engine.isCorrectingQuestion {
+            if !engine.isLocalMicrophoneInterviewMode, engine.isCorrectingQuestion {
                 correctionActions
             }
         }
@@ -2578,9 +2607,13 @@ struct InterviewWorkspaceActionBar: View {
             if liveSessionController.state.isRunning {
                 recordingStatus
             }
-            ViewThatFits(in: .horizontal) {
-                wideControls
-                compactControls
+            if isLocalMicrophoneInterviewMode {
+                localMicrophoneControls
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    wideControls
+                    compactControls
+                }
             }
         }
         .padding(.horizontal, 14)
@@ -2595,7 +2628,11 @@ struct InterviewWorkspaceActionBar: View {
             Button("结束面试", role: .destructive, action: onEndInterview)
             Button("取消", role: .cancel) {}
         } message: {
-            Text("当前录音与生成会停止；本地录音将合并为 M4A，并保存到本场面试历史。")
+            Text(
+                isLocalMicrophoneInterviewMode
+                    ? "当前听题与转写会停止；本场文字会保存，原始麦克风音频不会保存。"
+                    : "当前录音与生成会停止；本地录音将合并为 M4A，并保存到本场面试历史。"
+            )
         }
         .accessibilityIdentifier("copilot.actionBar")
     }
@@ -2617,6 +2654,12 @@ struct InterviewWorkspaceActionBar: View {
     }
 
     private var recordingStatusText: String {
+        if isLocalMicrophoneInterviewMode {
+            if isAudioCapturePaused { return "面试会话已暂停 · 继续后可开始听题" }
+            if engine.isFinishingExternalInterviewQuestion { return "正在完成本题转写 · 原始音频不保存" }
+            if engine.isListeningToExternalInterviewQuestion { return "正在听题 · 本机麦克风 · 原始音频不保存" }
+            return "等待开始听题 · 手机请开免提 · 原始音频不保存"
+        }
         guard liveSessionController.state.isLocalRecordingEnabled else {
             return "本场录音保存已关闭 · 可在设置 → Recording 中开启"
         }
@@ -2654,6 +2697,59 @@ struct InterviewWorkspaceActionBar: View {
             regenerateButton(compact: true)
             endInterviewButton(compact: true)
             moreMenu
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var localMicrophoneControls: some View {
+        HStack(spacing: 10) {
+            if engine.isFinishingExternalInterviewQuestion {
+                ProgressView()
+                    .controlSize(.small)
+                Text("正在完成听题…")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else if engine.isListeningToExternalInterviewQuestion {
+                Button {
+                    engine.endExternalInterviewQuestion()
+                } label: {
+                    Label("结束听题", systemImage: "stop.fill")
+                        .frame(minWidth: 126, minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isAudioCapturePaused)
+                .help("停止本题收音并保存最终转写")
+                .accessibilityIdentifier("copilot.externalQuestion.finish")
+
+                Button {
+                    engine.discardExternalInterviewQuestion()
+                } label: {
+                    Label("放弃并重录", systemImage: "arrow.counterclockwise")
+                        .frame(minWidth: 112, minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.bordered)
+                .disabled(isAudioCapturePaused)
+                .help("丢弃当前听题片段，重新开始")
+                .accessibilityIdentifier("copilot.externalQuestion.discard")
+            } else {
+                Button {
+                    engine.startExternalInterviewQuestion()
+                } label: {
+                    Label("开始听题", systemImage: "mic.fill")
+                        .frame(minWidth: 126, minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isAudioCapturePaused)
+                .help("开始收取手机免提里的面试官问题")
+                .accessibilityIdentifier("copilot.externalQuestion.start")
+            }
+
+            Spacer(minLength: 8)
+            endInterviewButton(compact: false)
         }
         .fixedSize(horizontal: false, vertical: true)
     }
@@ -2851,6 +2947,9 @@ struct InterviewWorkspaceActionBar: View {
 
     private var isAudioCapturePaused: Bool { liveSessionController.state.isRecordingPaused }
     private var isMicMuted: Bool { liveSessionController.state.isMicMuted }
+    private var isLocalMicrophoneInterviewMode: Bool {
+        engine.isLocalMicrophoneInterviewMode
+    }
 }
 
 private extension InterviewLiveSupplementItem {

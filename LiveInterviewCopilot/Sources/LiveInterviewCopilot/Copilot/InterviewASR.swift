@@ -15,6 +15,20 @@ enum InterviewAudioMode: String, Codable, CaseIterable, Sendable {
     }
 }
 
+/// Selects where the interviewer audio comes from during manual interview ASR.
+/// This stays separate from `InterviewAudioMode`, which selects the ASR path.
+enum InterviewAudioSource: String, Codable, CaseIterable, Sendable {
+    case systemAudio
+    case localMicrophone
+
+    var label: String {
+        switch self {
+        case .systemAudio: "系统音频"
+        case .localMicrophone: "本机麦克风（手机免提）"
+        }
+    }
+}
+
 enum InterviewASRProvider: String, Codable, CaseIterable, Sendable {
     case tencentStreaming
     case qwenLocalFallback

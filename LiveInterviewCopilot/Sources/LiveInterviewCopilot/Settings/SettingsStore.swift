@@ -675,6 +675,17 @@ final class SettingsStore {
         }
     }
 
+    @ObservationIgnored nonisolated(unsafe) private var _interviewAudioSource: InterviewAudioSource
+    var interviewAudioSource: InterviewAudioSource {
+        get { access(keyPath: \.interviewAudioSource); return _interviewAudioSource }
+        set {
+            withMutation(keyPath: \.interviewAudioSource) {
+                _interviewAudioSource = newValue
+                defaults.set(newValue.rawValue, forKey: "interviewAudioSource")
+            }
+        }
+    }
+
     @ObservationIgnored nonisolated(unsafe) private var _tencentASRAppID: String
     var tencentASRAppID: String {
         get { access(keyPath: \.tencentASRAppID); return _tencentASRAppID }
@@ -1985,6 +1996,9 @@ final class SettingsStore {
         self._interviewAudioMode = InterviewAudioMode(
             rawValue: defaults.string(forKey: "interviewAudioMode") ?? ""
         ) ?? .manualStreamingASR
+        self._interviewAudioSource = InterviewAudioSource(
+            rawValue: defaults.string(forKey: "interviewAudioSource") ?? ""
+        ) ?? .systemAudio
         self._tencentASRAppID = defaults.string(forKey: "tencentASRAppID") ?? ""
         self._tencentASRSecretID = ""
         self._tencentASRSecretKey = ""

@@ -74,6 +74,10 @@ private struct CopilotSettingsTab: View {
     @State private var showQwenAdvanced = false
 
     private var engine: CustomerCopilotEngine? { coordinator.customerCopilotEngine }
+    private var isLocalMicrophoneInterviewMode: Bool {
+        settings.interviewAudioMode == .manualStreamingASR
+            && settings.interviewAudioSource == .localMicrophone
+    }
     private var codexModelPresetLabel: String {
         modelDisplayName(settings.interviewCodexModel)
     }
@@ -151,6 +155,30 @@ private struct CopilotSettingsTab: View {
                 .disabled(coordinator.transcriptionEngine?.isRunning == true)
                 .onChange(of: settings.interviewAudioMode) { _, _ in
                     engine?.reconfigureInterviewAudioMode()
+                }
+
+                if settings.interviewAudioMode == .manualStreamingASR {
+                    Picker("面试官音频来源", selection: $settings.interviewAudioSource) {
+                        ForEach(InterviewAudioSource.allCases, id: \.rawValue) { source in
+                            Text(source.label).tag(source)
+                        }
+                    }
+                    .disabled(coordinator.transcriptionEngine?.isRunning == true)
+                    .onChange(of: settings.interviewAudioSource) { _, _ in
+                        engine?.reconfigureInterviewAudioMode()
+                    }
+
+                    if settings.interviewAudioSource == .localMicrophone {
+                        Text("手机开免提并放在电脑麦克风附近；沿用 Transcription → Audio Input 的输入设备设置。只有点击“开始听题”时才收音，不保存原始音频，也不需要系统音频权限。")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Text("从电脑系统音频接收面试官声音；继续沿用现有系统音频权限和输出设备设置。")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
 
                 if coordinator.transcriptionEngine?.isRunning == true {
@@ -257,34 +285,45 @@ private struct CopilotSettingsTab: View {
             }
 
             Section("音频检查") {
-                LabeledContent("候选人麦克风", value: settings.inputDeviceName ?? "系统默认输入设备")
-                LabeledContent("面试官系统音频", value: settings.outputDeviceName ?? "系统默认输出设备")
+                LabeledContent(
+                    isLocalMicrophoneInterviewMode ? "听题麦克风" : "候选人麦克风",
+                    value: settings.inputDeviceName ?? "系统默认输入设备"
+                )
+                if isLocalMicrophoneInterviewMode {
+                    LabeledContent("系统音频", value: "本模式不启用")
+                } else {
+                    LabeledContent("面试官系统音频", value: settings.outputDeviceName ?? "系统默认输出设备")
+                }
                 LabeledContent("麦克风权限") {
                     Text(microphonePermissionLabel)
                         .foregroundStyle(microphonePermission == .authorized ? Color.green : Color.orange)
                 }
-                LabeledContent("屏幕录制权限") {
-                    Text(CGPreflightScreenCaptureAccess() ? "已允许" : "尚未允许或需重新启动")
-                        .foregroundStyle(CGPreflightScreenCaptureAccess() ? Color.green : Color.orange)
+                if !isLocalMicrophoneInterviewMode {
+                    LabeledContent("屏幕录制权限") {
+                        Text(CGPreflightScreenCaptureAccess() ? "已允许" : "尚未允许或需重新启动")
+                            .foregroundStyle(CGPreflightScreenCaptureAccess() ? Color.green : Color.orange)
+                    }
                 }
                 TimelineView(.periodic(from: .now, by: 0.2)) { _ in
                     let transcription = coordinator.transcriptionEngine
                     let health = transcription?.captureHealthSnapshot
                     VStack(alignment: .leading, spacing: 6) {
                         audioChannelMeter(
-                            title: "Mic / 候选人",
+                            title: isLocalMicrophoneInterviewMode ? "Mic / 听题麦克风" : "Mic / 候选人",
                             level: transcription?.micAudioLevel ?? 0,
                             hasFrames: health?.micHasCapturedFrames ?? false,
                             lastFrameAt: health?.micLastFrameAt,
                             sampleRate: health?.micSampleRate
                         )
-                        audioChannelMeter(
-                            title: "System / 面试官",
-                            level: transcription?.systemAudioLevel ?? 0,
-                            hasFrames: health?.systemHasCapturedFrames ?? false,
-                            lastFrameAt: health?.systemLastFrameAt,
-                            sampleRate: health?.systemSampleRate
-                        )
+                        if !isLocalMicrophoneInterviewMode {
+                            audioChannelMeter(
+                                title: "System / 面试官",
+                                level: transcription?.systemAudioLevel ?? 0,
+                                hasFrames: health?.systemHasCapturedFrames ?? false,
+                                lastFrameAt: health?.systemLastFrameAt,
+                                sampleRate: health?.systemSampleRate
+                            )
+                        }
                         LabeledContent("采集状态", value: coordinator.transcriptionEngine?.assetStatus ?? "尚未启动")
                         if let error = health?.micCaptureError ?? coordinator.transcriptionEngine?.lastError,
                            !error.isEmpty {
@@ -310,14 +349,18 @@ private struct CopilotSettingsTab: View {
                             }
                         }
                     }
-                    if !CGPreflightScreenCaptureAccess() {
+                    if !isLocalMicrophoneInterviewMode, !CGPreflightScreenCaptureAccess() {
                         Button("打开屏幕录制设置") {
                             if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
                                 NSWorkspace.shared.open(url)
                             }
                         }
                     }
-                    Button(audioTestTask == nil ? "进行 3 秒双路测试" : "测试中…") {
+                    Button(
+                        audioTestTask == nil
+                            ? (isLocalMicrophoneInterviewMode ? "进行 3 秒麦克风测试" : "进行 3 秒双路测试")
+                            : "测试中…"
+                    ) {
                         runAudioTest()
                     }
                     .disabled(audioTestTask != nil || coordinator.transcriptionEngine?.isRunning != true)
@@ -327,7 +370,11 @@ private struct CopilotSettingsTab: View {
                         .font(.system(size: 10))
                         .foregroundStyle(audioTestMessage.contains("通过") ? Color.green : Color.orange)
                 }
-                Text("请先点击 Start，再测试两路音频。收到帧但电平过低通常是静音或音量问题；完全没有帧通常是权限、设备或采集启动问题。设备可在 Transcription → Audio Input 中切换。")
+                Text(
+                    isLocalMicrophoneInterviewMode
+                        ? "请先点击 Start，再在主面板点击“开始听题”后测试麦克风。收到帧但电平过低通常是手机距离或音量问题；完全没有帧通常是权限、设备或采集启动问题。输入设备可在 Transcription → Audio Input 中切换。"
+                        : "请先点击 Start，再测试两路音频。收到帧但电平过低通常是静音或音量问题；完全没有帧通常是权限、设备或采集启动问题。设备可在 Transcription → Audio Input 中切换。"
+                )
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -653,7 +700,9 @@ private struct CopilotSettingsTab: View {
 
     private func runAudioTest() {
         guard audioTestTask == nil, let transcription = coordinator.transcriptionEngine, transcription.isRunning else {
-            audioTestMessage = "请先点击 Start，启动系统音频和麦克风采集。"
+            audioTestMessage = isLocalMicrophoneInterviewMode
+                ? "请先点击 Start，并在面板点击“开始听题”。"
+                : "请先点击 Start，启动系统音频和麦克风采集。"
             return
         }
         audioTestMessage = nil
@@ -673,8 +722,12 @@ private struct CopilotSettingsTab: View {
             }
 
             let micResult = !micFrames ? "Mic 无帧" : (micPeak > 0.002 ? "Mic 通过" : "Mic 音量低")
-            let systemResult = !systemFrames ? "System 无帧" : (systemPeak > 0.002 ? "System 通过" : "System 音量低")
-            audioTestMessage = "测试完成：\(micResult)；\(systemResult)。"
+            if isLocalMicrophoneInterviewMode {
+                audioTestMessage = "测试完成：\(micResult)。"
+            } else {
+                let systemResult = !systemFrames ? "System 无帧" : (systemPeak > 0.002 ? "System 通过" : "System 音量低")
+                audioTestMessage = "测试完成：\(micResult)；\(systemResult)。"
+            }
             audioTestTask = nil
         }
     }

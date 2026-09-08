@@ -23,6 +23,22 @@ enum CLTProgressiveVerify {
         }
 
         do {
+            try await runRegenerateCreatesNewQuestionRevision()
+            print("PASS regenerateCreatesNewQuestionRevision")
+        } catch {
+            failures.append("regenerateCreatesNewQuestionRevision: \(error)")
+            print("FAIL regenerateCreatesNewQuestionRevision: \(error)")
+        }
+
+        do {
+            try runInterviewRoundModuleLifecycle()
+            print("PASS interviewRoundModuleLifecycle")
+        } catch {
+            failures.append("interviewRoundModuleLifecycle: \(error)")
+            print("FAIL interviewRoundModuleLifecycle: \(error)")
+        }
+
+        do {
             try await runSuccessfulAPIFallbackStillLocksSession()
             print("PASS successfulAPIFallbackStillLocksSession")
         } catch {
@@ -102,6 +118,55 @@ private func runRegenerateWithThinkingDepthUpdatesSettings() async throws {
     try expect(harness.settings.interviewAnswerDepth == .deep, "answer depth not mapped to deep")
     try expect(harness.engine.selectedThinkingDepth == .medium, "selected API thinking depth not medium")
     try expect(await terra.latestReasoningEffort() == .medium, "API request reasoning effort not medium")
+}
+
+@MainActor
+private func runRegenerateCreatesNewQuestionRevision() async throws {
+    let terra = ProgressiveProvider(behavior: .success(marker: "Terra", delayMilliseconds: 10))
+    let harness = makeHarness(
+        api: terra,
+        codex: ProgressiveProvider(behavior: .failure(.invalidResponse))
+    )
+
+    submitQuestion("如何判断产品优先级？", to: harness)
+    guard await waitUntil({ harness.engine.progressiveAnswer != nil }) else {
+        throw VerifyError.message("first answer did not complete")
+    }
+    let turnToken = harness.engine.interviewTurnToken
+    let revision = harness.engine.runDiagnostics.revisionCount
+
+    harness.engine.regenerateCurrentAnswer()
+    guard await waitUntil({
+        await terra.requestCount() == 2 && harness.engine.progressiveAnswer != nil
+    }) else {
+        throw VerifyError.message("regenerated answer did not complete")
+    }
+    try expect(harness.engine.interviewTurnToken == turnToken, "regenerate changed Interview Round")
+    try expect(
+        harness.engine.runDiagnostics.revisionCount == revision + 1,
+        "regenerate did not create a Question Revision"
+    )
+}
+
+@MainActor
+private func runInterviewRoundModuleLifecycle() throws {
+    let rounds = InterviewRoundModule()
+    rounds.accept(.interviewerQuestionObserved)
+    let initial = rounds.presentation
+    rounds.accept(.questionRevised)
+    rounds.accept(.answerRegenerated)
+    let latest = rounds.presentation
+
+    try expect(initial.roundID == latest.roundID, "revision changed Interview Round")
+    try expect(initial.turnID == latest.turnID, "revision changed turn identity")
+    try expect(latest.revision == 2, "expected correction and regeneration revisions")
+    try expect(!rounds.accepts(turnID: initial.turnID, revision: initial.revision), "stale revision accepted")
+    try expect(rounds.accepts(turnID: latest.turnID, revision: latest.revision), "latest revision rejected")
+
+    rounds.accept(.candidateBeganAnswering)
+    try expect(rounds.presentation.isAnswerFrozen, "candidate answer did not freeze presentation")
+    rounds.accept(.interviewerQuestionObserved)
+    try expect(!rounds.presentation.isAnswerFrozen, "new Interview Round remained frozen")
 }
 
 @MainActor

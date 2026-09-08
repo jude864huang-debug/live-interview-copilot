@@ -15,9 +15,9 @@ struct CopilotTurnHotkey: Codable, Hashable, Sendable {
     }
 
     static let defaultTurn = CopilotTurnHotkey(
-        keyCode: 5,
-        modifierRawValue: NSEvent.ModifierFlags([.control, .option]).rawValue,
-        keyLabel: "G"
+        keyCode: 6,
+        modifierRawValue: NSEvent.ModifierFlags.option.rawValue,
+        keyLabel: "Z"
     )
 
     static let merge = CopilotTurnHotkey(

@@ -119,7 +119,7 @@ final class CustomerCopilotEngine {
     private(set) var lastCuePrewarmReady: Bool?
     private(set) var lastCuePrewarmDurationMilliseconds: Int?
     private(set) var lastCueTransport: String?
-    private(set) var isAnswerFrozen = false
+    var isAnswerFrozen: Bool { interviewRounds.presentation.isAnswerFrozen }
     private(set) var realtimeState: RealtimeInterviewState = .disconnected
     private(set) var manualTurnState: ManualInterviewTurnState = .idle
     private(set) var activeInterviewRole: InterviewRole?
@@ -131,11 +131,18 @@ final class CustomerCopilotEngine {
     private(set) var qwenFallbackPrewarmStatus = "未预热"
     private(set) var pendingSegmentText: String?
     private(set) var pendingSegmentRole: InterviewRole?
+    private(set) var isListeningToExternalInterviewQuestion = false
+    private(set) var isFinishingExternalInterviewQuestion = false
     private(set) var isUsingKnowledgeBrief = false
     private(set) var isUsingConfiguredKnowledgeBrief = false
     private(set) var activeKnowledgeTokenCount: Int?
 
     var interviewAudioMode: InterviewAudioMode { settings.interviewAudioMode }
+    var interviewAudioSource: InterviewAudioSource { settings.interviewAudioSource }
+    var isLocalMicrophoneInterviewMode: Bool {
+        settings.interviewAudioMode == .manualStreamingASR
+            && settings.interviewAudioSource == .localMicrophone
+    }
     var micAudioLevel: Float { transcriptionEngine?.micAudioLevel ?? 0 }
     var systemAudioLevel: Float { transcriptionEngine?.systemAudioLevel ?? 0 }
     var captureHealthSnapshot: CaptureHealthSnapshot? { transcriptionEngine?.captureHealthSnapshot }
@@ -147,6 +154,11 @@ final class CustomerCopilotEngine {
     /// question keep this token; a genuinely new question receives a new one.
     /// Presentation layers use it instead of guessing from mutable ASR text.
     var interviewTurnToken: UUID { currentGenerationTurnID }
+    /// Presentation identity includes the revision so a regenerated or
+    /// corrected answer cannot be mistaken for an unchanged lens turn.
+    var interviewTurnPresentationToken: String {
+        "\(currentGenerationTurnID.uuidString):\(currentGenerationTurnRevision)"
+    }
 
     var mode: CopilotMode {
         didSet { defaults.set(mode.rawValue, forKey: "copilotMode") }
@@ -373,6 +385,7 @@ final class CustomerCopilotEngine {
     }
 
     private let transcriptStore: TranscriptStore
+    private let interviewRounds = InterviewRoundModule()
     private let apiProvider: any InterviewGenerationProvider
     private let codexProvider: any InterviewGenerationProvider
     private let apiCredentialProvider: @Sendable () -> String?
@@ -393,7 +406,7 @@ final class CustomerCopilotEngine {
     private var nextAutomaticFollowUpIndex = 0
     private var draftUtteranceIDs: [UUID] = []
     private var handledUtteranceIDs: Set<UUID> = []
-    private var candidateSpokeSincePrompt = false
+    private var candidateSpokeSincePrompt: Bool { interviewRounds.presentation.candidateSpokeSincePrompt }
     private var candidateSpeechStartedForActiveAnswer = false
     private var sessionID = UUID().uuidString
     private var activeRequestStartedAt: Date?
@@ -413,8 +426,9 @@ final class CustomerCopilotEngine {
     private var activeFollowUpAnswerRequestIDs: [String: UUID] = [:]
     private var activeFollowUpContext: ReferenceGenerationContext?
     private var activeFollowUpProviderPolicy: ReferenceProviderPolicy?
-    private var currentRoundID: UUID?
-    private var currentRoundCreatedAt: Date?
+    @ObservationIgnored private var knowledgeBriefCache: [KnowledgeBriefCacheKey: RealtimeInterviewBrief] = [:]
+    private var currentRoundID: UUID? { interviewRounds.presentation.roundID }
+    private var currentRoundCreatedAt: Date? { interviewRounds.presentation.createdAt }
     private var historyLoadTask: Task<Void, Never>?
     private var archivedRoundCompletions: [UUID: ArchivedRoundCompletion] = [:]
     private var roundPersistenceTasks: [UUID: RoundPersistence] = [:]
@@ -430,8 +444,8 @@ final class CustomerCopilotEngine {
     private var latestQuestionASRResult: ManualInterviewASRResult?
     private var requestASRMetadata: [UUID: ManualInterviewASRResult] = [:]
     private var currentQuestionRevision = 0
-    private var currentGenerationTurnID = UUID()
-    private var currentGenerationTurnRevision = 0
+    private var currentGenerationTurnID: UUID { interviewRounds.presentation.turnID }
+    private var currentGenerationTurnRevision: Int { interviewRounds.presentation.revision }
     private var pendingSegmentExpiresAt: Date?
     private var pendingSegmentExpiryTask: Task<Void, Never>?
     private weak var transcriptionEngine: TranscriptionEngine?
@@ -494,8 +508,7 @@ final class CustomerCopilotEngine {
         cuePreviewItems = []
         recentCues = []
         archivedRounds = []
-        currentRoundID = nil
-        currentRoundCreatedAt = nil
+        interviewRounds.accept(.reset)
         resetPredictedFollowUpReference()
         referenceAnswer = nil
         referenceAnswerPreviewSegments = []
@@ -521,7 +534,6 @@ final class CustomerCopilotEngine {
         errorMessage = nil
         previousResultWasSuperseded = false
         isUsingSlowFallback = false
-        isAnswerFrozen = false
         manualTurnState = .idle
         activeInterviewRole = nil
         asrPartialText = ""
@@ -532,6 +544,8 @@ final class CustomerCopilotEngine {
         qwenFallbackPrewarmStatus = "未预热"
         pendingSegmentText = nil
         pendingSegmentRole = nil
+        isListeningToExternalInterviewQuestion = false
+        isFinishingExternalInterviewQuestion = false
         isUsingKnowledgeBrief = false
         isUsingConfiguredKnowledgeBrief = false
         activeKnowledgeTokenCount = nil
@@ -540,7 +554,6 @@ final class CustomerCopilotEngine {
         pendingSegmentExpiryTask = nil
         draftUtteranceIDs = []
         handledUtteranceIDs.removeAll(keepingCapacity: true)
-        candidateSpokeSincePrompt = false
         candidateSpeechStartedForActiveAnswer = false
         manualASRMetadataByUtteranceID.removeAll()
         preparedManualBoundaryID = nil
@@ -551,8 +564,6 @@ final class CustomerCopilotEngine {
         supersededRequestID = nil
         requestSupersedes.removeAll(keepingCapacity: true)
         currentQuestionRevision = 0
-        currentGenerationTurnID = UUID()
-        currentGenerationTurnRevision = 0
         activeReferenceRequestStartedAt = nil
         activeReferenceParentCueRequestID = nil
         lastCompletedCueRequestID = nil
@@ -562,6 +573,7 @@ final class CustomerCopilotEngine {
         activeReferenceContext = nil
         activeFollowUpContext = nil
         activeFollowUpProviderPolicy = nil
+        knowledgeBriefCache.removeAll(keepingCapacity: true)
         let manualController = manualTurnController
         manualTurnController = nil
         let fallback = qwenASRFallback
@@ -752,7 +764,11 @@ final class CustomerCopilotEngine {
         guard settings.interviewAudioMode == .manualStreamingASR else { return }
         configureManualTurnController()
         guard let controller = manualTurnController else { return }
-        Task { await controller.start() }
+        if !isLocalMicrophoneInterviewMode {
+            Task { await controller.start() }
+        } else {
+            asrStatusMessage = "点击“开始听题”后收取手机免提声音"
+        }
         if let fallback = qwenASRFallback {
             qwenFallbackPrewarmStatus = "预热中…"
             Task { [weak self] in
@@ -788,12 +804,70 @@ final class CustomerCopilotEngine {
         manualTurnState = .idle
         activeInterviewRole = nil
         asrPartialText = ""
+        isListeningToExternalInterviewQuestion = false
+        isFinishingExternalInterviewQuestion = false
         pendingSegmentExpiryTask?.cancel()
         pendingSegmentExpiryTask = nil
         pendingSegmentExpiresAt = nil
         pendingSegmentText = nil
         pendingSegmentRole = nil
         qwenFallbackPrewarmStatus = "未预热"
+    }
+
+    func startExternalInterviewQuestion() {
+        guard isLocalMicrophoneInterviewMode else { return }
+        guard !isListeningToExternalInterviewQuestion,
+              !isFinishingExternalInterviewQuestion else { return }
+        guard let transcriptionEngine, transcriptionEngine.isRunning else {
+            errorMessage = "请先启动一场面试，再开始听题。"
+            return
+        }
+        guard let controller = manualTurnController else {
+            errorMessage = "面试音频会话尚未准备好，请结束并重新开始本场面试。"
+            return
+        }
+
+        clearExternalInterviewQuestionDraft()
+        isListeningToExternalInterviewQuestion = true
+        isFinishingExternalInterviewQuestion = false
+        Task { [weak self] in
+            guard let self else { return }
+            await controller.startInterviewerTurn()
+            let didStart = await transcriptionEngine.startInterviewMicrophoneCapture()
+            guard didStart else {
+                await controller.discardActiveTurn()
+                isListeningToExternalInterviewQuestion = false
+                errorMessage = transcriptionEngine.lastError ?? "无法启动本机麦克风。"
+                return
+            }
+        }
+    }
+
+    func endExternalInterviewQuestion() {
+        guard isLocalMicrophoneInterviewMode,
+              isListeningToExternalInterviewQuestion,
+              !isFinishingExternalInterviewQuestion else { return }
+        guard let transcriptionEngine, let controller = manualTurnController else { return }
+
+        isFinishingExternalInterviewQuestion = true
+        Task {
+            await transcriptionEngine.stopInterviewMicrophoneCapture()
+            await controller.commitActiveTurn()
+        }
+    }
+
+    func discardExternalInterviewQuestion() {
+        guard isLocalMicrophoneInterviewMode else { return }
+        guard let transcriptionEngine, let controller = manualTurnController else { return }
+        isListeningToExternalInterviewQuestion = false
+        isFinishingExternalInterviewQuestion = false
+        Task { [weak self] in
+            await transcriptionEngine.stopInterviewMicrophoneCapture()
+            await controller.discardActiveTurn()
+            guard let self else { return }
+            self.asrPartialText = ""
+            self.transcriptStore.volatileThemText = ""
+        }
     }
 
     func awaitPendingInterviewHistoryPersistence() async {
@@ -842,6 +916,10 @@ final class CustomerCopilotEngine {
                     self?.manualTurnState = state
                     self?.activeInterviewRole = role
                     self?.isUsingLocalASRFallback = state == .fallbackTranscribing
+                    if self?.isLocalMicrophoneInterviewMode == true, state == .idle {
+                        self?.isListeningToExternalInterviewQuestion = false
+                        self?.isFinishingExternalInterviewQuestion = false
+                    }
                     if state == .listeningInterviewer {
                         self?.candidateSpeechStartedForActiveAnswer = false
                     }
@@ -857,6 +935,7 @@ final class CustomerCopilotEngine {
             },
             onInterviewerCommit: { [weak self] boundaryID, revision, partial in
                 await MainActor.run {
+                    guard self?.isLocalMicrophoneInterviewMode != true else { return }
                     self?.prepareManualInterviewerDraft(
                         boundaryID: boundaryID,
                         revision: revision,
@@ -868,15 +947,31 @@ final class CustomerCopilotEngine {
                 await MainActor.run {
                     guard let self else { return }
                     self.candidateSpeechStartedForActiveAnswer = true
-                    self.candidateSpokeSincePrompt = true
-                    self.isAnswerFrozen = true
+                    self.interviewRounds.accept(.candidateBeganAnswering)
                 }
             },
             onFinal: { [weak self] result in
-                await MainActor.run { self?.acceptManualASRResult(result) }
+                await MainActor.run {
+                    self?.acceptManualASRResult(result)
+                    if self?.isLocalMicrophoneInterviewMode == true {
+                        self?.isListeningToExternalInterviewQuestion = false
+                        self?.isFinishingExternalInterviewQuestion = false
+                    }
+                }
             },
             onStatus: { [weak self] status in
-                await MainActor.run { self?.asrStatusMessage = status }
+                await MainActor.run {
+                    guard let self else { return }
+                    self.asrStatusMessage = status
+                    // A short or failed segment has no final callback. Allow
+                    // the user to retry once the controller reports that case.
+                    if self.isLocalMicrophoneInterviewMode,
+                       self.isFinishingExternalInterviewQuestion,
+                       self.manualTurnState == .idle {
+                        self.isListeningToExternalInterviewQuestion = false
+                        self.isFinishingExternalInterviewQuestion = false
+                    }
+                }
             },
             onPendingSegment: { [weak self] role, text in
                 await MainActor.run {
@@ -891,7 +986,8 @@ final class CustomerCopilotEngine {
             fallbackTranscriber: { samples, previousContext in
                 try await fallback.transcribe(samples: samples, previousContext: previousContext)
             },
-            callbacks: callbacks
+            callbacks: callbacks,
+            interviewerOnly: isLocalMicrophoneInterviewMode
         )
     }
 
@@ -910,8 +1006,6 @@ final class CustomerCopilotEngine {
             currentQuestion = cleaned
             currentQuestionRevision = revision
             draftUtteranceIDs = []
-            candidateSpokeSincePrompt = false
-            isAnswerFrozen = false
             supplementalSuggestion = nil
             referenceAnswer = nil
             maybeActivatePredictedFollowUpReference(for: currentQuestion)
@@ -932,6 +1026,54 @@ final class CustomerCopilotEngine {
         activeProvider = .local
         generationState = .draftReady
         errorMessage = nil
+    }
+
+    private func clearExternalInterviewQuestionDraft() {
+        currentQuestion = ""
+        asrOriginalQuestion = ""
+        questionWasCorrected = false
+        resetQuestionCorrectionState()
+        questionRiskHighlights = []
+        activeQuestionHighlightID = nil
+        suggestion = nil
+        supplementalSuggestion = nil
+        cuePreviewItems = []
+        referenceAnswer = nil
+        referenceAnswerPreviewSegments = []
+        progressiveAnswer = nil
+        answerProgress = .empty
+        generationState = .listening
+        referenceGenerationState = .idle
+        referenceErrorMessage = nil
+        asrPartialText = ""
+        transcriptStore.volatileThemText = ""
+        isUsingLocalASRFallback = false
+        lastASRWasLowConfidence = false
+    }
+
+    private func acceptExternalInterviewQuestion(
+        _ utterance: Utterance,
+        metadata: ManualInterviewASRResult
+    ) {
+        let text = utterance.displayText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        currentQuestion = text
+        currentQuestionRevision = metadata.revision
+        asrOriginalQuestion = text
+        questionWasCorrected = false
+        resetQuestionCorrectionState()
+        questionRiskHighlights = []
+        activeQuestionHighlightID = nil
+        suggestion = nil
+        supplementalSuggestion = nil
+        cuePreviewItems = []
+        generationState = .listening
+        referenceAnswer = nil
+        referenceAnswerPreviewSegments = []
+        progressiveAnswer = nil
+        answerProgress = .empty
+        referenceGenerationState = .idle
+        referenceErrorMessage = nil
     }
 
     private func acceptManualASRResult(_ result: ManualInterviewASRResult) {
@@ -990,11 +1132,15 @@ final class CustomerCopilotEngine {
         _ utterance: Utterance,
         metadata: ManualInterviewASRResult
     ) {
+        if isLocalMicrophoneInterviewMode {
+            guard metadata.role == .interviewer else { return }
+            acceptExternalInterviewQuestion(utterance, metadata: metadata)
+            return
+        }
         if metadata.role == .candidate {
             guard metadata.revision > currentQuestionRevision else { return }
             guard !currentQuestion.isEmpty else { return }
-            candidateSpokeSincePrompt = true
-            isAnswerFrozen = true
+            interviewRounds.accept(.candidateBeganAnswering)
             return
         }
         guard metadata.revision >= currentQuestionRevision else { return }
@@ -1103,8 +1249,7 @@ final class CustomerCopilotEngine {
 
         if !utterance.speaker.isRemote {
             guard !currentQuestion.isEmpty else { return }
-            candidateSpokeSincePrompt = true
-            isAnswerFrozen = true
+            interviewRounds.accept(.candidateBeganAnswering)
             return
         }
 
@@ -1138,8 +1283,9 @@ final class CustomerCopilotEngine {
             resetQuestionCorrectionState(seedQuestion: text)
             if let manualRevision { currentQuestionRevision = manualRevision }
             draftUtteranceIDs = [utterance.id]
-            candidateSpokeSincePrompt = candidateAlreadySpeaking
-            isAnswerFrozen = candidateAlreadySpeaking
+            if candidateAlreadySpeaking {
+                interviewRounds.accept(.candidateAnswerAlreadyInProgress)
+            }
             supplementalSuggestion = nil
             referenceAnswer = nil
             maybeActivatePredictedFollowUpReference(for: currentQuestion)
@@ -1263,6 +1409,7 @@ final class CustomerCopilotEngine {
         if let reasoningEffort {
             applyThinkingDepth(reasoningEffort)
         }
+        reviseGenerationTurn(for: .answerRegenerated)
         startProgressiveAnswerGeneration(question: currentQuestion)
     }
 
@@ -1560,8 +1707,7 @@ final class CustomerCopilotEngine {
         Task { await historyStore.deleteAll() }
         recentCues = []
         archivedRounds = []
-        currentRoundID = nil
-        currentRoundCreatedAt = nil
+        interviewRounds.accept(.clearCurrentRound)
         resetPredictedFollowUpReference()
     }
 
@@ -1592,8 +1738,7 @@ final class CustomerCopilotEngine {
         }
         recentCues = []
         archivedRounds = []
-        currentRoundID = nil
-        currentRoundCreatedAt = nil
+        interviewRounds.accept(.clearCurrentRound)
         resetPredictedFollowUpReference()
     }
 
@@ -2060,6 +2205,13 @@ final class CustomerCopilotEngine {
         let parentCueRequestID: UUID?
         let parentCueIncludedCandidateContext: Bool
         let sourceUtteranceIDs: [UUID]
+    }
+
+    private struct KnowledgeBriefCacheKey: Hashable {
+        let knowledgeHash: String
+        let question: String
+        let preferredMaxTokens: Int
+        let maxTokens: Int
     }
 
     private func startProgressiveAnswerGeneration(question: String) {
@@ -3564,17 +3716,16 @@ final class CustomerCopilotEngine {
 
     private func beginGenerationTurn() {
         cancelReferenceGeneration(state: .superseded, persist: true)
-        currentGenerationTurnID = UUID()
-        currentGenerationTurnRevision = 0
-        currentRoundID = UUID()
-        currentRoundCreatedAt = Date()
+        knowledgeBriefCache.removeAll(keepingCapacity: true)
+        interviewRounds.accept(.interviewerQuestionObserved)
         resetPredictedFollowUpReference()
         resetReferencePresentation()
     }
 
-    private func reviseGenerationTurn() {
+    private func reviseGenerationTurn(for event: InterviewRoundEvent = .questionRevised) {
         cancelReferenceGeneration(state: .superseded, persist: true)
-        currentGenerationTurnRevision += 1
+        knowledgeBriefCache.removeAll(keepingCapacity: true)
+        interviewRounds.accept(event)
         resetReferencePresentation()
     }
 
@@ -3673,9 +3824,11 @@ final class CustomerCopilotEngine {
                     limit: maxContextTokens
                 )
             }
-            let brief = knowledge.makeRealtimeBrief(
-                maxTokens: min(preferredKnowledgeBriefTokens, availableForKnowledge),
-                question: question
+            let brief = cachedRealtimeBrief(
+                knowledge: knowledge,
+                question: question,
+                preferredMaxTokens: preferredKnowledgeBriefTokens,
+                availableMaxTokens: availableForKnowledge
             )
             let briefPrompt = buildPrompt(
                 question: question,
@@ -3742,9 +3895,11 @@ final class CustomerCopilotEngine {
             throw CopilotError.contextTooLarge(estimated: fullEstimate, limit: maxContextTokens)
         }
 
-        let brief = knowledge.makeRealtimeBrief(
-            maxTokens: min(40_000, availableForKnowledge),
-            question: question
+        let brief = cachedRealtimeBrief(
+            knowledge: knowledge,
+            question: question,
+            preferredMaxTokens: min(40_000, availableForKnowledge),
+            availableMaxTokens: availableForKnowledge
         )
         let briefPrompt = buildPrompt(
             question: question,
@@ -3768,6 +3923,38 @@ final class CustomerCopilotEngine {
             knowledgeTokens: brief.estimatedTokenCount,
             includedCandidateContext: includedCandidateContext
         )
+    }
+
+    private func cachedRealtimeBrief(
+        knowledge: KnowledgePackageSnapshot,
+        question: String,
+        preferredMaxTokens: Int,
+        availableMaxTokens: Int
+    ) -> RealtimeInterviewBrief {
+        let maxTokens = min(preferredMaxTokens, availableMaxTokens)
+        let matchingCached = knowledgeBriefCache
+            .filter { key, _ in
+                key.knowledgeHash == knowledge.hash
+                    && key.question == question
+                    && key.preferredMaxTokens == preferredMaxTokens
+                    && key.maxTokens <= maxTokens
+            }
+            .max { lhs, rhs in lhs.key.maxTokens < rhs.key.maxTokens }
+        if let matchingCached {
+            return matchingCached.value
+        }
+
+        let brief = knowledge.makeRealtimeBrief(
+            maxTokens: maxTokens,
+            question: question
+        )
+        knowledgeBriefCache[KnowledgeBriefCacheKey(
+            knowledgeHash: knowledge.hash,
+            question: question,
+            preferredMaxTokens: preferredMaxTokens,
+            maxTokens: maxTokens
+        )] = brief
+        return brief
     }
 
     private func stopGeneration(persist shouldPersist: Bool, state: CopilotGenerationState) {
@@ -4177,16 +4364,14 @@ final class CustomerCopilotEngine {
     }
 
     private func establishCurrentRoundIdentity(fallbackID: UUID) {
-        if currentRoundID == nil { currentRoundID = fallbackID }
-        if currentRoundCreatedAt == nil { currentRoundCreatedAt = Date() }
+        interviewRounds.establishRoundIdentity(fallbackID: fallbackID)
     }
 
     private func currentRoundRecord(question: String) -> InterviewHistoryAnswer? {
         guard let answer = referenceAnswer else { return nil }
+        establishCurrentRoundIdentity(fallbackID: UUID())
         let roundID = currentRoundID ?? UUID()
         let createdAt = currentRoundCreatedAt ?? Date()
-        currentRoundID = roundID
-        currentRoundCreatedAt = createdAt
         return InterviewHistoryAnswer(
             id: roundID,
             createdAt: createdAt,

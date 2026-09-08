@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 // MARK: - Suggestion Trigger
@@ -253,8 +254,13 @@ struct Suggestion: Identifiable, Sendable, Codable, Equatable {
 
 // MARK: - Session Record
 
-/// Codable record for JSONL session persistence
-struct SessionRecord: Codable {
+/// Codable record for JSONL session persistence.
+///
+/// The ID is persisted so SwiftUI can keep a transcript row's identity while
+/// cleanup replaces only its derived text. Older JSONL records without an ID
+/// receive a deterministic fallback during decoding.
+struct SessionRecord: Codable, Identifiable {
+    let id: String
     let speaker: Speaker
     let text: String
     let timestamp: Date
@@ -270,13 +276,14 @@ struct SessionRecord: Codable {
     let suggestionLifecycle: SuggestionLifecycle?
 
     enum CodingKeys: String, CodingKey {
-        case speaker, text, timestamp, suggestions, kbHits
+        case id, speaker, text, timestamp, suggestions, kbHits
         case suggestionDecision, surfacedSuggestionText, conversationStateSummary
         case cleanedText = "refinedText"
         case suggestionID, triggerUtteranceID, suggestionLifecycle
     }
 
     init(
+        id: String = UUID().uuidString,
         speaker: Speaker,
         text: String,
         timestamp: Date,
@@ -290,6 +297,7 @@ struct SessionRecord: Codable {
         triggerUtteranceID: UUID? = nil,
         suggestionLifecycle: SuggestionLifecycle? = nil
     ) {
+        self.id = id
         self.speaker = speaker
         self.text = text
         self.timestamp = timestamp
@@ -304,8 +312,38 @@ struct SessionRecord: Codable {
         self.suggestionLifecycle = suggestionLifecycle
     }
 
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        speaker = try container.decode(Speaker.self, forKey: .speaker)
+        text = try container.decode(String.self, forKey: .text)
+        timestamp = try container.decode(Date.self, forKey: .timestamp)
+        suggestions = try container.decodeIfPresent([String].self, forKey: .suggestions)
+        kbHits = try container.decodeIfPresent([String].self, forKey: .kbHits)
+        suggestionDecision = try container.decodeIfPresent(SuggestionDecision.self, forKey: .suggestionDecision)
+        surfacedSuggestionText = try container.decodeIfPresent(String.self, forKey: .surfacedSuggestionText)
+        conversationStateSummary = try container.decodeIfPresent(String.self, forKey: .conversationStateSummary)
+        cleanedText = try container.decodeIfPresent(String.self, forKey: .cleanedText)
+        suggestionID = try container.decodeIfPresent(UUID.self, forKey: .suggestionID)
+        triggerUtteranceID = try container.decodeIfPresent(UUID.self, forKey: .triggerUtteranceID)
+        suggestionLifecycle = try container.decodeIfPresent(SuggestionLifecycle.self, forKey: .suggestionLifecycle)
+
+        let decodedID = try container.decodeIfPresent(String.self, forKey: .id)
+        id = decodedID?.isEmpty == false
+            ? decodedID!
+            : Self.legacyID(speaker: speaker, text: text, timestamp: timestamp)
+    }
+
+    private static func legacyID(speaker: Speaker, text: String, timestamp: Date) -> String {
+        let identity = "\(timestamp.timeIntervalSince1970.bitPattern)|\(speaker.storageKey)|\(text)"
+        let digest = SHA256.hash(data: Data(identity.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "legacy-\(digest)"
+    }
+
     func withCleanedText(_ text: String?) -> SessionRecord {
         SessionRecord(
+            id: id,
             speaker: speaker, text: self.text, timestamp: timestamp,
             suggestions: suggestions, kbHits: kbHits,
             suggestionDecision: suggestionDecision,

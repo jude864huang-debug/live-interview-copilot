@@ -129,6 +129,8 @@ final class CustomerCopilotEngineReferenceTests: XCTestCase {
         let didFinishFirstAnswer = await waitUntil { harness.engine.progressiveAnswer != nil }
         XCTAssertTrue(didFinishFirstAnswer)
         XCTAssertTrue(harness.engine.canRegenerateCurrentAnswer)
+        let firstTurnToken = harness.engine.interviewTurnToken
+        let firstRevision = harness.engine.runDiagnostics.revisionCount
 
         harness.engine.regenerateCurrentAnswer()
 
@@ -138,6 +140,8 @@ final class CustomerCopilotEngineReferenceTests: XCTestCase {
         let requestCount = await terra.requestCount()
         XCTAssertTrue(didFinishSecondAnswer)
         XCTAssertEqual(requestCount, 2)
+        XCTAssertEqual(harness.engine.interviewTurnToken, firstTurnToken)
+        XCTAssertEqual(harness.engine.runDiagnostics.revisionCount, firstRevision + 1)
     }
 
     func testAPIFallbackFailureUnlocksOriginalModelForRetry() async {

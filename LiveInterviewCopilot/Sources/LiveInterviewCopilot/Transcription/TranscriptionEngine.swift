@@ -290,6 +290,7 @@ final class TranscriptionEngine {
     /// Listens for default output device changes at the OS level.
     private var defaultOutputDeviceListenerBlock: AudioObjectPropertyListenerBlock?
     private var micRestartTask: Task<Void, Never>?
+    private var micHealthTask: Task<Void, Never>?
     private var sysRestartTask: Task<Void, Never>?
     private var systemAudioHealthTask: Task<Void, Never>?
     private var pendingMicDeviceID: AudioDeviceID?
@@ -488,6 +489,20 @@ final class TranscriptionEngine {
             assetStatus = manualInterviewAudioSink == nil
                 ? "Starting GPT Realtime audio…"
                 : "Starting interview audio…"
+
+            // A phone interview uses the Mac microphone only for explicit,
+            // user-started question segments. Keep the session alive so the
+            // existing interview lifecycle and transcript persistence remain
+            // unchanged, but defer all audio capture until the panel starts a
+            // question. System audio is deliberately never opened here.
+            if manualInterviewAudioSink != nil,
+               settings.interviewAudioSource == .localMicrophone {
+                userSelectedDeviceID = inputDeviceID
+                currentMicDeviceID = 0
+                assetStatus = "等待开始听题"
+                return
+            }
+
             guard let targetMicID = resolvedMicDeviceID(for: inputDeviceID) else {
                 lastError = unavailableMicMessage(for: inputDeviceID)
                 activeTranscriptionSession = nil
@@ -747,6 +762,57 @@ final class TranscriptionEngine {
         }
     }
 
+    /// Starts one explicit microphone capture segment for a phone interview.
+    /// The surrounding interview session stays alive between segments, but no
+    /// microphone frames are produced while this method has not been called.
+    @discardableResult
+    func startInterviewMicrophoneCapture() async -> Bool {
+        guard isRunning,
+              manualInterviewAudioSink != nil,
+              settings.interviewAudioSource == .localMicrophone else {
+            return false
+        }
+
+        guard await ensureMicrophonePermission() else { return false }
+        // Reuse the existing input-device setting; ID 0 means the current
+        // system default microphone.
+        let inputDeviceID = settings.inputDeviceID
+        guard let targetMicID = resolvedMicDeviceID(for: inputDeviceID) else {
+            lastError = unavailableMicMessage(for: inputDeviceID)
+            return false
+        }
+
+        await stopInterviewMicrophoneCapture()
+        userSelectedDeviceID = inputDeviceID
+        currentMicDeviceID = targetMicID
+        startRealtimeMicCapture(
+            deviceID: inputDeviceID == 0 ? nil : targetMicID,
+            sourceRole: .interviewer,
+            recordToAudioRecorder: false
+        )
+        installDefaultDeviceListener()
+        scheduleInterviewMicHealthCheck(inputDeviceID: inputDeviceID, resolvedDeviceID: targetMicID)
+        lastError = nil
+        assetStatus = "正在听题（本机麦克风）"
+        return true
+    }
+
+    /// Stops the current phone-interview microphone segment without ending the
+    /// surrounding interview session.
+    func stopInterviewMicrophoneCapture() async {
+        guard settings.interviewAudioSource == .localMicrophone else { return }
+        micHealthTask?.cancel()
+        micHealthTask = nil
+        removeDefaultDeviceListener()
+        micCapture.finishStream()
+        micTask?.cancel()
+        await micTask?.value
+        micTask = nil
+        micCapture.stop()
+        currentMicDeviceID = 0
+        if isRunning { assetStatus = "等待开始听题" }
+    }
+
     // MARK: - Default Device Listener
 
     private func installDefaultDeviceListener() {
@@ -868,9 +934,11 @@ final class TranscriptionEngine {
         removeDefaultDeviceListener()
         removeDefaultOutputDeviceListener()
         micRestartTask?.cancel()
+        micHealthTask?.cancel()
         sysRestartTask?.cancel()
         systemAudioHealthTask?.cancel()
         micRestartTask = nil
+        micHealthTask = nil
         sysRestartTask = nil
         systemAudioHealthTask = nil
         pendingMicDeviceID = nil
@@ -929,9 +997,11 @@ final class TranscriptionEngine {
         removeDefaultDeviceListener()
         removeDefaultOutputDeviceListener()
         micRestartTask?.cancel()
+        micHealthTask?.cancel()
         sysRestartTask?.cancel()
         systemAudioHealthTask?.cancel()
         micRestartTask = nil
+        micHealthTask = nil
         sysRestartTask = nil
         systemAudioHealthTask = nil
         pendingMicDeviceID = nil
@@ -996,7 +1066,13 @@ final class TranscriptionEngine {
         }
 
         if realtimeInterviewAudioSink != nil || manualInterviewAudioSink != nil {
-            startRealtimeMicCapture(deviceID: inputDeviceID == 0 ? nil : targetMicID)
+            let isLocalMicrophoneInterview = manualInterviewAudioSink != nil
+                && settings.interviewAudioSource == .localMicrophone
+            startRealtimeMicCapture(
+                deviceID: inputDeviceID == 0 ? nil : targetMicID,
+                sourceRole: isLocalMicrophoneInterview ? .interviewer : .candidate,
+                recordToAudioRecorder: !isLocalMicrophoneInterview
+            )
         } else if let vadManager {
             startMicStream(
                 locale: settings.locale,
@@ -1159,9 +1235,13 @@ final class TranscriptionEngine {
         }
     }
 
-    private func startRealtimeMicCapture(deviceID: AudioDeviceID?) {
+    private func startRealtimeMicCapture(
+        deviceID: AudioDeviceID?,
+        sourceRole: InterviewRole = .candidate,
+        recordToAudioRecorder: Bool = true
+    ) {
         var stream = micCapture.bufferStream(deviceID: deviceID, echoCancellation: false)
-        if let recorder = audioRecorder {
+        if recordToAudioRecorder, let recorder = audioRecorder {
             stream = Self.tappedStream(stream) { buffer in
                 recorder.writeMicBuffer(buffer)
             }
@@ -1170,14 +1250,17 @@ final class TranscriptionEngine {
             micTask = Task.detached {
                 for await buffer in stream {
                     guard let chunk = InterviewPCMEncoder.encode(buffer) else { continue }
-                    await sink(chunk, .candidate)
+                    await sink(chunk, sourceRole)
                 }
             }
         } else if let sink = realtimeInterviewAudioSink {
             micTask = Task.detached {
                 for await buffer in stream {
                     guard let chunk = RealtimePCMEncoder.encode(buffer) else { continue }
-                    await sink(chunk, .candidate)
+                    let realtimeRole: RealtimeInterviewRole = sourceRole == .interviewer
+                        ? .interviewer
+                        : .candidate
+                    await sink(chunk, realtimeRole)
                 }
             }
         }
@@ -1220,7 +1303,9 @@ final class TranscriptionEngine {
         inputDeviceID: AudioDeviceID,
         resolvedDeviceID: AudioDeviceID?
     ) {
-        Task { @MainActor [weak self] in
+        micHealthTask?.cancel()
+        micHealthTask = Task { @MainActor [weak self] in
+            defer { self?.micHealthTask = nil }
             try? await Task.sleep(for: .seconds(3))
             guard let self, self.isRunning,
                   self.realtimeInterviewAudioSink != nil || self.manualInterviewAudioSink != nil,
@@ -1237,7 +1322,13 @@ final class TranscriptionEngine {
             self.micTask = nil
             self.micCapture.stop()
             let retryDevice: AudioDeviceID? = inputDeviceID == 0 ? resolvedDeviceID : nil
-            self.startRealtimeMicCapture(deviceID: retryDevice)
+            let isLocalMicrophoneInterview = self.manualInterviewAudioSink != nil
+                && self.settings.interviewAudioSource == .localMicrophone
+            self.startRealtimeMicCapture(
+                deviceID: retryDevice,
+                sourceRole: isLocalMicrophoneInterview ? .interviewer : .candidate,
+                recordToAudioRecorder: !isLocalMicrophoneInterview
+            )
 
             try? await Task.sleep(for: .seconds(3))
             guard self.isRunning, !self.micCapture.hasCapturedFrames else {

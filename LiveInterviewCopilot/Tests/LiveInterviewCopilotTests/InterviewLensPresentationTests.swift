@@ -40,6 +40,26 @@ final class InterviewLensPresentationTests: XCTestCase {
         XCTAssertTrue(state.snapshot?.isFrozen == true)
     }
 
+    func testStatusOnlySnapshotDoesNotReportContentChange() {
+        let state = makeState()
+        state.activate(.quickIdea, initialSnapshot: snapshot(text: "稳定提示"))
+
+        let result = state.receive(snapshot(text: "稳定提示", streaming: true))
+
+        XCTAssertEqual(result, .unchanged)
+    }
+
+    func testContentAndTurnChangesAreReportedSeparately() {
+        let state = makeState()
+        state.activate(.quickIdea, initialSnapshot: snapshot(text: "第一版"))
+
+        let contentResult = state.receive(snapshot(text: "第二版"))
+        XCTAssertEqual(contentResult, .contentChanged)
+
+        let turnResult = state.receive(snapshot(turn: "turn-2", text: "新一轮"))
+        XCTAssertEqual(turnResult, .turnChanged)
+    }
+
     func testEmptyCardAcceptsSuccessiveStreamingResultsWhileAnswering() {
         let state = makeState()
         state.activate(
@@ -237,17 +257,17 @@ final class InterviewLensPresentationTests: XCTestCase {
         let state = makeState()
         state.activate(.quickIdea, initialSnapshot: snapshot(text: "一条稳定提示"))
 
-        state.updateLayout(
+        XCTAssertTrue(state.updateLayout(
             panelSize: CGSize(width: 440, height: 175),
             fontScale: .percent200
-        )
+        ))
         XCTAssertFalse(state.showsQuestionContext)
         XCTAssertFalse(state.pages.isEmpty)
 
-        state.updateLayout(
-            panelSize: CGSize(width: 440, height: 220),
+        XCTAssertFalse(state.updateLayout(
+            panelSize: CGSize(width: 440, height: 175),
             fontScale: .percent200
-        )
+        ))
         XCTAssertFalse(state.showsQuestionContext)
     }
 

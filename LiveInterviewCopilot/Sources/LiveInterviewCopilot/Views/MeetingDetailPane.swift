@@ -3293,7 +3293,7 @@ struct MeetingDetailPane<SessionFolderMenuItems: View>: View {
                         if case .inProgress = state.cleanupStatus { return true }
                         return false
                     }()
-                    ForEach(Array(state.loadedTranscript.enumerated()), id: \.offset) { _, record in
+                    ForEach(state.loadedTranscript) { record in
                         transcriptRow(
                             record: record,
                             isCleaning: isCleaning,

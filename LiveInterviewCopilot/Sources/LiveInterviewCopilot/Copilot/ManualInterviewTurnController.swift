@@ -103,6 +103,7 @@ actor ManualInterviewTurnController {
     private let sessionFactory: SessionFactory
     private let fallbackTranscriber: FallbackTranscriber
     private let callbacks: ManualInterviewTurnCallbacks
+    private let interviewerOnly: Bool
     private let preRollDuration: TimeInterval
     private let maximumFallbackDuration: TimeInterval
     private let minimumCommitDuration: TimeInterval
@@ -123,6 +124,7 @@ actor ManualInterviewTurnController {
         sessionFactory: @escaping SessionFactory,
         fallbackTranscriber: @escaping FallbackTranscriber,
         callbacks: ManualInterviewTurnCallbacks,
+        interviewerOnly: Bool = false,
         preRollDuration: TimeInterval = 1.5,
         maximumFallbackDuration: TimeInterval = 15 * 60,
         minimumCommitDuration: TimeInterval = 0.3,
@@ -131,6 +133,7 @@ actor ManualInterviewTurnController {
         self.sessionFactory = sessionFactory
         self.fallbackTranscriber = fallbackTranscriber
         self.callbacks = callbacks
+        self.interviewerOnly = interviewerOnly
         self.preRollDuration = preRollDuration
         self.maximumFallbackDuration = maximumFallbackDuration
         self.minimumCommitDuration = minimumCommitDuration
@@ -144,6 +147,25 @@ actor ManualInterviewTurnController {
         activeRole = .interviewer
         systemPreRoll.removeAll(keepingCapacity: true)
         systemPreRollSeconds = 0
+        await callbacks.onState(state, activeRole)
+        await openSegment(role: .interviewer, preRoll: [])
+    }
+
+    /// Starts the next interviewer-only segment after the previous phone
+    /// question has been finalized or discarded.
+    func startInterviewerTurn() async {
+        guard interviewerOnly else {
+            await start()
+            return
+        }
+        if !isRunning {
+            await start()
+            return
+        }
+        guard activeSegmentID == nil, segments.isEmpty else { return }
+        activeRole = .interviewer
+        state = .listeningInterviewer
+        await callbacks.onPartial(.interviewer, "")
         await callbacks.onState(state, activeRole)
         await openSegment(role: .interviewer, preRoll: [])
     }
@@ -240,6 +262,24 @@ actor ManualInterviewTurnController {
             await callbacks.onInterviewerCommit(segment.id, segment.revision, segment.stablePartial)
         }
 
+        if interviewerOnly, committedRole == .interviewer {
+            activeSegmentID = nil
+            if hasCapturedContent {
+                Task { [weak self] in await self?.finalizeSegment(id) }
+            } else {
+                segment.eventTask?.cancel()
+                segment.connectionTask?.cancel()
+                await segment.session?.cancel()
+                await segment.session?.disconnect()
+                segments.removeValue(forKey: id)
+                state = .idle
+                await callbacks.onPartial(.interviewer, "")
+                await callbacks.onState(.idle, nil)
+                await callbacks.onStatus("本段没有检测到可提交的语音，请重新开始听题。")
+            }
+            return
+        }
+
         if !hasCapturedContent {
             segment.eventTask?.cancel()
             segment.connectionTask?.cancel()
@@ -254,6 +294,28 @@ actor ManualInterviewTurnController {
         if hasCapturedContent {
             Task { [weak self] in await self?.finalizeSegment(id) }
         }
+    }
+
+    /// Drops the active interviewer-only segment without sending it to ASR
+    /// finalization. The next button press opens a fresh segment.
+    func discardActiveTurn() async {
+        guard interviewerOnly else { return }
+        guard let id = activeSegmentID else {
+            state = .idle
+            await callbacks.onState(.idle, nil)
+            return
+        }
+        activeSegmentID = nil
+        if let segment = segments.removeValue(forKey: id) {
+            segment.eventTask?.cancel()
+            segment.connectionTask?.cancel()
+            await segment.session?.cancel()
+            await segment.session?.disconnect()
+        }
+        state = .idle
+        await callbacks.onPartial(.interviewer, "")
+        await callbacks.onState(.idle, nil)
+        await callbacks.onStatus("当前听题片段已放弃，请重新开始听题。")
     }
 
     private func advanceToNextRole(after committedRole: InterviewRole) async {
@@ -666,8 +728,8 @@ actor ManualInterviewTurnController {
         }
         await callbacks.onStatus(status)
         if isRunning {
-            state = activeRole == .interviewer ? .listeningInterviewer : .listeningCandidate
-            await callbacks.onState(state, activeRole)
+            state = interviewerOnly ? .idle : (activeRole == .interviewer ? .listeningInterviewer : .listeningCandidate)
+            await callbacks.onState(state, interviewerOnly ? nil : activeRole)
         }
     }
 
@@ -678,8 +740,8 @@ actor ManualInterviewTurnController {
         await segment.session?.disconnect()
         await callbacks.onStatus(message)
         if isRunning {
-            state = activeRole == .interviewer ? .listeningInterviewer : .listeningCandidate
-            await callbacks.onState(state, activeRole)
+            state = interviewerOnly ? .idle : (activeRole == .interviewer ? .listeningInterviewer : .listeningCandidate)
+            await callbacks.onState(state, interviewerOnly ? nil : activeRole)
         } else {
             state = .failed
             await callbacks.onState(.failed, nil)

@@ -1563,5 +1563,16 @@ final class SessionRepositoryTests: XCTestCase {
         XCTAssertEqual(decoded.suggestions, ["Try asking about X"])
         XCTAssertEqual(decoded.kbHits, ["doc.md"])
         XCTAssertEqual(decoded.cleanedText, "Hello there.")
+        XCTAssertEqual(decoded.id, record.id)
+    }
+
+    func testCleanedTextUpdatePreservesSessionRecordID() {
+        let record = SessionRecord(
+            speaker: .them,
+            text: "原始转写",
+            timestamp: Date(timeIntervalSince1970: 1_000_001)
+        )
+
+        XCTAssertEqual(record.withCleanedText("清理后的转写").id, record.id)
     }
 }

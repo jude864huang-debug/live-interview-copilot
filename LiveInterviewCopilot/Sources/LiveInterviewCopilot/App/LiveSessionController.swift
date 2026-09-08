@@ -213,6 +213,8 @@ final class LiveSessionController {
     private var pendingRecoveryDiagnostics: PendingRecoveryDiagnostics?
     private var pendingAutoNotesSessionID: String?
     private var autoGeneratingNotesSessionID: String?
+    @ObservationIgnored private var debugSyncCount = 0
+    @ObservationIgnored private var debugLastSyncAt: UInt64?
 
     init(coordinator: AppCoordinator, container: AppContainer) {
         self.coordinator = coordinator
@@ -338,8 +340,23 @@ final class LiveSessionController {
     }
 
     func syncProjectedState(settings: AppSettings) {
+        let syncStartedAt = TemporaryPerformanceProbe.now()
+        let syncGapMs = debugLastSyncAt.map {
+            Double(syncStartedAt - $0) / 1_000_000
+        } ?? 0
+        debugLastSyncAt = syncStartedAt
+        debugSyncCount += 1
         refreshState(settings: settings)
         synchronizeDerivedState(settings: settings)
+        let syncDurationMs = TemporaryPerformanceProbe.milliseconds(since: syncStartedAt)
+        if debugSyncCount == 1
+            || debugSyncCount % 20 == 0
+            || syncGapMs >= 500
+            || syncDurationMs >= 10 {
+            TemporaryPerformanceProbe.log(
+                "session.sync count=\(debugSyncCount) gap_ms=\(syncGapMs) duration_ms=\(syncDurationMs) running=\(state.isRunning) transcript_count=\(state.liveTranscript.count)"
+            )
+        }
     }
 
     // MARK: - Session Actions
@@ -1238,6 +1255,19 @@ final class LiveSessionController {
     }
 
     static func audioRetentionPlan(settings: AppSettings, utteranceCount: Int?) -> AudioRetentionPlan {
+        // Phone interviews use the Mac microphone only as a temporary ASR
+        // source. Do not start the recorder or retain a recovery batch even if
+        // the user's general recording preference is enabled.
+        if settings.interviewAudioMode == .manualStreamingASR,
+           settings.interviewAudioSource == .localMicrophone {
+            return AudioRetentionPlan(
+                shouldStartRecorder: false,
+                shouldRetainBatchAudio: false,
+                shouldExportRecording: false,
+                shouldRunRecoveryBatch: false
+            )
+        }
+
         let shouldRunRecoveryBatch = settings.transcriptionModel.isCloud && utteranceCount == 0
         let shouldRetainBatchAudio = settings.enableBatchRetranscription || shouldRunRecoveryBatch
         let shouldExportRecording = settings.saveAudioRecording

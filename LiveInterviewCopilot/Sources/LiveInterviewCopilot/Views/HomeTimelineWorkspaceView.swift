@@ -338,13 +338,13 @@ struct HomeTimelineWorkspaceView: View {
             controller.selectSession(session.id)
             detailViewMode = session.hasNotes ? .notes : .transcript
         }
-        resizeMainWindow(detailVisible: true)
+        updateMainWindowMinimumSize()
     }
 
     private func collapseDetail(controller: NotesController) {
         selectedEntryID = nil
         controller.selectSession(nil)
-        resizeMainWindow(detailVisible: false)
+        updateMainWindowMinimumSize()
     }
 
     private func requestDeletionForSelectedSession() {
@@ -377,17 +377,17 @@ struct HomeTimelineWorkspaceView: View {
                 ?? controller.state.sessionHistory.first(where: { $0.id == sessionID })
             detailViewMode = selectedSession?.source == "imported" ? .transcript : .notes
             selectedEntryID = "session:\(sessionID)"
-            resizeMainWindow(detailVisible: true)
+            updateMainWindowMinimumSize()
         case .transcriptSession(let sessionID):
             controller.selectSession(sessionID)
             detailViewMode = .transcript
             selectedEntryID = "session:\(sessionID)"
-            resizeMainWindow(detailVisible: true)
+            updateMainWindowMinimumSize()
         case .retranscribeSession(let sessionID):
             controller.selectSession(sessionID)
             detailViewMode = .transcript
             selectedEntryID = "session:\(sessionID)"
-            resizeMainWindow(detailVisible: true)
+            updateMainWindowMinimumSize()
             try? await Task.sleep(for: .milliseconds(200))
             if controller.state.canRetranscribeSelectedSession {
                 container.ensureRecordingServicesInitialized(settings: settings, coordinator: coordinator)
@@ -400,11 +400,11 @@ struct HomeTimelineWorkspaceView: View {
             controller.showMeetingFamily(for: event)
             detailViewMode = .notes
             selectedEntryID = "calendar:\(event.id)"
-            resizeMainWindow(detailVisible: true)
+            updateMainWindowMinimumSize()
         case .manualTranscript(let event):
             detailViewMode = .transcript
             selectedEntryID = "calendar:\(event.id)"
-            resizeMainWindow(detailVisible: true)
+            updateMainWindowMinimumSize()
             let shouldPromptForTranscript = await controller.prepareManualTranscriptSession(for: event)
             if shouldPromptForTranscript {
                 beginAddTranscript()
@@ -413,7 +413,7 @@ struct HomeTimelineWorkspaceView: View {
             controller.selectSession(nil)
             detailViewMode = .notes
             selectedEntryID = nil
-            resizeMainWindow(detailVisible: false)
+            updateMainWindowMinimumSize()
         }
 
         return true
@@ -512,32 +512,17 @@ struct HomeTimelineWorkspaceView: View {
         showingAddTranscriptSheet = true
     }
 
-    private func resizeMainWindow(detailVisible: Bool) {
+    private func updateMainWindowMinimumSize() {
         guard let window = NSApp.windows.first(where: { $0.identifier?.rawValue == LiveInterviewCopilotRootApp.mainWindowID }) else {
             return
         }
 
-        let minimumSize = detailVisible
-            ? LiveInterviewCopilotWindowSizing.mainWindowExpandedMinSize
-            : LiveInterviewCopilotWindowSizing.mainWindowCollapsedMinSize
-        window.contentMinSize = minimumSize
-
-        // Closing the detail pane should not discard a size the user chose.
-        // AppKit's frame autosave will carry that size across launches.
-        guard detailVisible else { return }
-
-        let currentFrame = window.frame
-        let newWidth = max(currentFrame.width, minimumSize.width)
-        let newHeight = max(currentFrame.height, minimumSize.height)
-        guard abs(newWidth - currentFrame.width) > 8 || abs(newHeight - currentFrame.height) > 8 else {
-            return
-        }
-
-        var frame = currentFrame
-        frame.origin.x -= max(0, newWidth - currentFrame.width)
-        frame.size.width = newWidth
-        frame.size.height = newHeight
-        window.setFrame(frame, display: true, animate: true)
+        // Selecting a history item changes the view composition, not the
+        // user's window preference. The previous implementation promoted the
+        // frame to `mainWindowExpandedMinSize` here, so a click silently
+        // enlarged a custom-sized window. Keep the lifecycle-owned minimum and
+        // let the current frame stay untouched.
+        window.contentMinSize = LiveInterviewCopilotWindowSizing.mainWindowCollapsedMinSize
     }
 
     // MARK: - Session Folders

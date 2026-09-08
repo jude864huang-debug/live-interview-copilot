@@ -25,8 +25,29 @@ enum Log {
     static let sidecast = Logger(subsystem: subsystem, category: "SidecastEngine")
     static let templateStore = Logger(subsystem: subsystem, category: "TemplateStore")
     static let diagnostics = Logger(subsystem: subsystem, category: "Diagnostics")
+    // Temporary performance probe. Remove together with TemporaryPerformanceProbe
+    // after the live lens/audio hang is diagnosed.
+    static let temporaryPerformance = Logger(subsystem: subsystem, category: "TemporaryPerformance")
 
     private static let subsystem = Bundle(for: BundleToken.self).bundleIdentifier ?? "com.jude864huang.liveinterviewcopilot.app"
 }
 
 private final class BundleToken {}
+
+enum TemporaryPerformanceProbe {
+    static let prefix = "[DEBUG-live-hang-20260811]"
+
+    static func now() -> UInt64 {
+        DispatchTime.now().uptimeNanoseconds
+    }
+
+    static func milliseconds(since start: UInt64) -> Double {
+        Double(now() - start) / 1_000_000
+    }
+
+    static func log(_ message: String) {
+        Log.temporaryPerformance.notice(
+            "\(prefix, privacy: .public) \(message, privacy: .public)"
+        )
+    }
+}

@@ -107,6 +107,35 @@ final class ManualInterviewTurnControllerTests: XCTestCase {
         await controller.stop()
     }
 
+    func testInterviewerOnlyModeNeverOpensCandidateTurn() async throws {
+        let factory = TurnSessionFactory()
+        let callbacks = TurnCallbackRecorder()
+        let controller = ManualInterviewTurnController(
+            sessionFactory: { role, boundaryID in
+                await factory.makeSession(role: role, boundaryID: boundaryID)
+            },
+            fallbackTranscriber: { _, _ in "unused fallback" },
+            callbacks: Self.callbackSet(callbacks),
+            interviewerOnly: true,
+            minimumCommitDuration: 0.3,
+            commitDebounce: 0
+        )
+
+        await controller.startInterviewerTurn()
+        await controller.ingest(audioChunk(duration: 0.4), sourceRole: .interviewer)
+        await controller.commitActiveTurn()
+
+        try await waitUntil { await callbacks.finalCount == 1 }
+        let roles = await factory.roles
+        let finalRoles = await callbacks.finalRoles
+        let activeRole = await callbacks.lastActiveRole
+        XCTAssertEqual(roles, [.interviewer])
+        XCTAssertEqual(finalRoles, [.interviewer])
+        XCTAssertNil(activeRole)
+
+        await controller.stop()
+    }
+
     func testTencentFailureRunsLocalFallbackOnlyOnce() async throws {
         let factory = TurnSessionFactory(finishBehavior: .failure(.connectionFailed))
         let callbacks = TurnCallbackRecorder()

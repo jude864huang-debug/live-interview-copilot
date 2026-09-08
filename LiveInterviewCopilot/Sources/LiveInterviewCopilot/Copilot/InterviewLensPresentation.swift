@@ -64,7 +64,7 @@ enum InterviewLensProjector {
         let questionContext = question.isEmpty ? partial : question
 
         return InterviewLensSnapshot(
-            turnToken: engine.interviewTurnToken.uuidString,
+            turnToken: engine.interviewTurnPresentationToken,
             questionContext: questionContext,
             units: units(
                 from: engine,
@@ -347,6 +347,8 @@ final class InterviewLensPresentationState {
 
     enum Reception: Equatable {
         case unchanged
+        case contentChanged
+        case turnChanged
         case selectionChanged(InterviewLensSelection)
     }
 
@@ -397,7 +399,7 @@ final class InterviewLensPresentationState {
         guard projected.selection == activeSelection else { return .unchanged }
         guard var current = snapshot else {
             activate(projected.selection, initialSnapshot: projected)
-            return .unchanged
+            return .contentChanged
         }
 
         if current.turnToken != projected.turnToken {
@@ -412,7 +414,7 @@ final class InterviewLensPresentationState {
 
             snapshot = projected
             rebuildPages(resetToFirstPage: true)
-            return .unchanged
+            return .turnChanged
         }
 
         let contentChanged = current.questionContext != projected.questionContext
@@ -430,6 +432,7 @@ final class InterviewLensPresentationState {
         snapshot = projected
         if contentChanged {
             rebuildPages(resetToFirstPage: false)
+            return .contentChanged
         }
         return .unchanged
     }
@@ -438,7 +441,7 @@ final class InterviewLensPresentationState {
         panelSize: CGSize,
         fontScale: InterviewLensFontScale,
         maximumPanelHeight: CGFloat? = nil
-    ) {
+    ) -> Bool {
         let fontSize = CGFloat(18 * fontScale.multiplier)
         let systemLineHeight = NSFont.systemFont(ofSize: fontSize).boundingRectForFont.height
         let lineSpacing = max(0, fontSize * 1.4 - systemLineHeight)
@@ -460,9 +463,10 @@ final class InterviewLensPresentationState {
             maximumPages: 12,
             overflowMessage: "其余内容请在主窗口查看"
         )
-        guard next != configuration else { return }
+        guard next != configuration else { return false }
         configuration = next
         rebuildPages(resetToFirstPage: false)
+        return true
     }
 
     func previousPage() {

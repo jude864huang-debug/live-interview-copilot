@@ -368,26 +368,37 @@ struct ContentView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
 
-            VStack(alignment: .leading, spacing: 7) {
-                Toggle(
-                    "候选人转写用于后续提示",
-                    isOn: Binding(
-                        get: { engine.includeCandidateAnswersInContext },
-                        set: { engine.includeCandidateAnswersInContext = $0 }
+            Group {
+                if engine.isLocalMicrophoneInterviewMode {
+                    Label(
+                        "仅在听题阶段收取手机免提声音；最终文字保存在本场转写。",
+                        systemImage: "mic.fill"
                     )
-                )
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .disabled(engine.interviewAudioMode != .manualStreamingASR)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 7) {
+                        Toggle(
+                            "候选人转写用于后续提示",
+                            isOn: Binding(
+                                get: { engine.includeCandidateAnswersInContext },
+                                set: { engine.includeCandidateAnswersInContext = $0 }
+                            )
+                        )
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .disabled(engine.interviewAudioMode != .manualStreamingASR)
 
-                Label(
-                    engine.includeCandidateAnswersInContext
-                        ? "会用于后续问题 · 历史每轮最多 500 字"
-                        : "仅保存在本机，不发送给后续文字模型",
-                    systemImage: engine.includeCandidateAnswersInContext ? "arrow.up.circle" : "lock.fill"
-                )
-                .font(.caption2)
-                .foregroundStyle(engine.includeCandidateAnswersInContext ? Color.accentColor : Color.secondary)
+                        Label(
+                            engine.includeCandidateAnswersInContext
+                                ? "会用于后续问题 · 历史每轮最多 500 字"
+                                : "仅保存在本机，不发送给后续文字模型",
+                            systemImage: engine.includeCandidateAnswersInContext ? "arrow.up.circle" : "lock.fill"
+                        )
+                        .font(.caption2)
+                        .foregroundStyle(engine.includeCandidateAnswersInContext ? Color.accentColor : Color.secondary)
+                    }
+                }
             }
             .padding(.horizontal, 14)
             .padding(.bottom, 9)

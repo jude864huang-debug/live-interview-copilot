@@ -189,6 +189,8 @@ struct InterviewLensFailure: Codable, Equatable, Hashable, Sendable {
 /// An immutable-by-convention state-machine payload. AI output may update this
 /// snapshot incrementally; text anchors keep the reader on the same source range.
 struct InterviewLensSnapshot: Codable, Equatable, Hashable, Sendable {
+    /// Presentation identity for the active turn; the projector includes the
+    /// turn revision so regeneration is not treated as a status-only update.
     var turnToken: String
     var questionContext: String
     var units: [InterviewLensSemanticUnit]

@@ -189,10 +189,21 @@ final class AudioRecorder: @unchecked Sendable {
             sysEndDate = now
             sysEndFrame = (sysFile?.length ?? 0) + Int64(buffer.frameLength)
 
+            let writeStartedAt = TemporaryPerformanceProbe.now()
             do {
                 try sysFile?.write(from: buffer)
             } catch {
                 Log.recorder.error("Sys write error: \(error, privacy: .public)")
+            }
+            let writeDurationMs = TemporaryPerformanceProbe.milliseconds(since: writeStartedAt)
+            sysWriteCount += 1
+            let shouldReport = writeDurationMs >= 10
+                || sysWriteCount == 1
+                || sysWriteCount % 100 == 0
+            if shouldReport {
+                TemporaryPerformanceProbe.log(
+                    "audio.sys_write count=\(sysWriteCount) frames=\(buffer.frameLength) duration_ms=\(writeDurationMs) main=\(Thread.isMainThread)"
+                )
             }
         }
     }

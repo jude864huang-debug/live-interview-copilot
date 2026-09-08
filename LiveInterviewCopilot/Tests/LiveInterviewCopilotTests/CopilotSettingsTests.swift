@@ -33,6 +33,7 @@ final class CopilotSettingsTests: XCTestCase {
         let store = makeStore()
 
         XCTAssertEqual(store.interviewAudioMode, .manualStreamingASR)
+        XCTAssertEqual(store.interviewAudioSource, .systemAudio)
         XCTAssertTrue(store.interviewASRAutoHotwordsEnabled)
         XCTAssertTrue(store.interviewAutoReferenceAnswerEnabled)
         XCTAssertEqual(
@@ -58,6 +59,19 @@ final class CopilotSettingsTests: XCTestCase {
         XCTAssertEqual(store.interviewLensSize, .defaultValue)
         XCTAssertEqual(store.interviewLensDisplayPlacements, [:])
         XCTAssertFalse(store.suggestionsAlwaysOnTop)
+    }
+
+    func testInterviewAudioSourceRoundTrips() {
+        let suiteName = "com.jude864huang.liveinterviewcopilot.copilot-audio-source.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let store = makeStore(defaults: defaults)
+        store.interviewAudioSource = .localMicrophone
+
+        XCTAssertEqual(store.interviewAudioSource, .localMicrophone)
+        XCTAssertEqual(defaults.string(forKey: "interviewAudioSource"), "localMicrophone")
+        XCTAssertEqual(makeStore(defaults: defaults).interviewAudioSource, .localMicrophone)
     }
 
     func testCodexModelAndReasoningSettingsRoundTrip() {

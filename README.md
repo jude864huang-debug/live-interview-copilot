@@ -1,20 +1,41 @@
 # Live Interview Copilot
 
-Live Interview Copilot is a macOS app for preparing and responding during remote product and business interviews. It separates interviewer system audio from the candidate microphone, transcribes the selected role in real time, and surfaces concise, grounded answer cues.
+Live Interview Copilot is a macOS app for preparing and responding during remote
+product and business interviews. It separates interviewer system audio from the
+candidate microphone, transcribes the selected role in real time, and surfaces
+concise, grounded answer cues.
 
 It never speaks for the candidate and does not store raw audio.
 
 ## What it does
 
-- Builds a local role package from your resume, story bank, job description, company research, and domain material.
-- Uses Tencent Cloud realtime ASR for the selected audio role, with local Qwen3-ASR as a slower fallback.
-- Shows a fast opening, focused talking points, evidence anchors, and likely follow-up questions.
-- Uses the OpenAI Responses API when configured. The locally signed-in Codex path is an experimental compatibility mode.
-- Keeps transcripts and generated cues locally; it does not upload your compiled reference package.
+- Builds a local role package from your resume, story bank, job description,
+  company research, and domain material.
+- Uses Tencent Cloud realtime ASR for the selected audio role, with local
+  Qwen3-ASR as a slower fallback.
+- Shows a fast opening, focused talking points, evidence anchors, and likely
+  follow-up questions.
+- Uses an LLM API first when configured, with the local Codex CLI path as a
+  fallback or explicit alternative.
+- Keeps transcripts and generated cues locally; it does not upload your
+  compiled reference package.
+
+## 用户快速开始
+
+第一次使用时，按这个顺序配置：
+
+1. 配置腾讯云实时 ASR，点击“测试连接”。
+2. 配置文字生成：优先选择 API；只有本机 `codex login` 已成功时才选择 Codex CLI。
+3. 在“音频检查”中确认麦克风、系统音频和权限正常。
+4. 选择本地面试材料并点击“重新编译”，然后开始面试。
+
+面试过程中默认使用手动分轮，不依赖 VAD 自动判断说话结束。快捷键和完整流程见
+[默认快捷键](#默认快捷键)和[手动分轮流程](#手动分轮流程)。
 
 ## 腾讯 ASR 快速配置
 
-Live Interview Copilot 默认使用腾讯云实时语音识别处理当前活动角色的音频。腾讯云 ASR 与 ChatGPT Pro、OpenAI API 分别计费，三者的额度不能互换。
+Live Interview Copilot 默认使用腾讯云实时语音识别处理当前活动角色的音频。
+腾讯云 ASR、LLM API 和 ChatGPT Pro 分别计费，额度不能互换。
 
 ### 1. 开通实时语音识别
 
@@ -36,9 +57,12 @@ Live Interview Copilot 默认使用腾讯云实时语音识别处理当前活动
 
 1. 打开 **Live Interview Copilot → Settings → Copilot → 面试 ASR**。
 2. 音频模式选择“腾讯流式 ASR（手动分轮）”。
-3. 填写 SecretID 和 SecretKey。
-4. 点击 APPID 右侧的“自动获取”。如果子用户没有查询权限，也可以手动填写腾讯云账号的纯数字 APPID。
-5. 点击“测试连接”，看到“腾讯云连接和鉴权成功”后再开始面试。
+3. 面试官音频来源通常选择“系统音频”；如果面试在手机上进行，可以选择“本机麦克风”，让手机开免提并靠近电脑麦克风。
+4. 填写 SecretID 和 SecretKey。
+5. 点击 APPID 右侧的“自动获取”。如果子用户没有查询权限，也可以手动填写腾讯云账号的纯数字 APPID。
+6. 点击“测试连接”，看到“腾讯云连接和鉴权成功”后再开始面试。
+
+系统音频模式需要麦克风和屏幕录制权限；“本机麦克风”听题模式只需要麦克风权限。设置页的“音频检查”可以先做 3 秒测试，再开始真实面试。
 
 SecretID 和 SecretKey 只保存在 macOS Keychain 中。APPID 不属于密钥，但仍不建议与账号信息一起公开。
 
@@ -64,15 +88,89 @@ SecretID 和 SecretKey 只保存在 macOS Keychain 中。APPID 不属于密钥�
 
 腾讯云暂时不可用时，应用可以尝试本地 Qwen3-ASR 慢速兜底；该兜底需要本机已安装对应程序和模型。
 
+## 文字生成（LLM）配置
+
+文字生成和腾讯云 ASR 是两套独立服务。没有 ChatGPT 账号或 ChatGPT 订阅时，
+优先使用 API；ChatGPT 订阅额度也不能直接当作 OpenAI API 额度。
+
+### 推荐：API 优先
+
+API 路径只需要对应服务商的 API key，不要求 ChatGPT 账号：
+
+1. 打开 **Settings → Copilot → 文字生成**。
+2. “生成通路”选择 **API 优先**。
+3. 在“API 协议”中选择服务商支持的协议：
+   - **OpenAI**：选择 `Responses API`，Base URL 填 `https://api.openai.com`。
+   - **DeepSeek**：选择 `Chat Completions`，Base URL 填
+     `https://api.deepseek.com`，默认模型可使用 `deepseek-chat`。
+   - 其他 OpenAI-compatible 服务：填写它的 API 根地址和对应协议。应用会自动补上 `/v1/responses` 或 `/v1/chat/completions`，不要重复填写完整路径。
+4. 填写 API Key，点击“验证并加载模型”。验证成功后，在“主回答模型”中选择该账号实际可用的模型。
+5. 可选：设置“备用回答模型”。主模型在产生第一句之前失败时，应用会尝试备用模型。
+
+API key 只保存在 macOS Keychain。API 服务商的账号、计费和限额由服务商单独管理；
+不要把 key 写进源码、提交到 GitHub 或粘贴到 Issue。
+
+在 **API 优先**模式下，应用会先调用 API；如果没有可用 API key，或请求在产生首句前失败，才会尝试 Codex CLI。两边都没有配置时，面试可以收音和转写，但不会生成文字回答。
+
+### 备用：Codex CLI
+
+Codex CLI 是本机登录的另一条文字生成通路。选择它之前，先在终端确认登录状态：
+
+```bash
+codex login
+codex login status
+```
+
+如果没有 ChatGPT 账号但有 OpenAI API key，当前 Codex CLI 也支持从标准输入完成 API key 登录；不要把 key 写进命令历史：
+
+```bash
+printf '%s' "$OPENAI_API_KEY" | codex login --with-api-key
+codex login status
+```
+
+然后在 **Settings → Copilot → 文字生成**中选择 **仅 Codex CLI**，填写或选择
+Codex 模型。应用读取本机 Codex 登录状态，不使用上面 API 配置框中的 key。
+登录状态无效、模型不可用或 Codex worker 未启动时，运行详情会显示失败原因。
+
+如果从源码运行，Codex worker 的依赖需要先安装：
+
+```bash
+npm --prefix worker ci
+```
+
+## 默认快捷键
+
+快捷键在面试进行时生效；设置页的“全局快捷键”可以重新录制主分轮快捷键。
+
+| 快捷键 | 功能 | 使用时机 |
+| --- | --- | --- |
+| `⌥Z`（Option+Z） | 手动换轮 | 面试官说完按一次，结束问题并生成提示；你回答完再按一次，保存回答并切回面试官 |
+| `⌥A`（Option+A） | 打开/关闭镜头卡 | 面试过程中随时显示或隐藏大字提示卡 |
+| `←` / `→` | 镜头卡翻页 | 镜头卡打开时切换内容页 |
+| `⌃⌥M` | 合并上一段 | ASR 把同一轮切成多段时合并 |
+| `⌃⌥S` | 停止生成 | 停止当前正在生成的文字回答 |
+
+### 手动分轮流程
+
+1. 点击 **Start**，确认状态显示正在听面试官。
+2. 面试官说完，按 `⌥Z`。当前问题会定稿，应用开始生成快速思路和回答。
+3. 你开始回答；回答结束后再按 `⌥Z`。本轮回答会保存，应用切回面试官收音。
+4. 需要大字提示时按 `⌥A`；镜头卡打开后可用左右方向键翻页。
+
+如果快捷键没有反应，先确认面试正在运行、应用没有停在快捷键录制状态，
+并在 Settings → Copilot → 全局快捷键中查看当前主分轮键。旧版本保存过自定义
+快捷键的用户不会被覆盖；点击“恢复默认”后才会使用新的默认 `⌥Z`。
+
 ## Development
 
 ```bash
-npm --prefix worker install
-codex login
+npm --prefix worker ci
 
 cd LiveInterviewCopilot
 swift run LiveInterviewCopilot
 ```
+
+只有使用 Codex CLI 路径时才需要额外执行 `codex login`；API 路径不需要 ChatGPT 登录。
 
 For a local app bundle:
 
@@ -80,12 +178,19 @@ For a local app bundle:
 SKIP_SIGN=1 SKIP_INSTALL=1 ./scripts/build_swift_app.sh
 ```
 
-The first full release requires a Developer ID Application certificate, Apple notarization credentials, and a new Sparkle EdDSA key pair configured as repository secrets. The prior product's update feed is deliberately disabled.
+The first full release requires a Developer ID Application certificate, Apple
+notarization credentials, and a new Sparkle EdDSA key pair configured as
+repository secrets. The prior product's update feed is deliberately disabled.
 
 ## Use responsibly
 
-Use the app only where interview rules and recording laws permit it, and obtain any required consent. Live Interview Copilot does not include screen-share hiding or monitoring-evasion features.
+Use the app only where interview rules and recording laws permit it, and obtain
+any required consent. Live Interview Copilot does not include screen-share
+hiding or monitoring-evasion features.
 
 ## Source history and license
 
-This project began from OpenOats and has since been substantially reworked as an interview copilot. The repository keeps that commit history for traceability. OpenOats is MIT licensed; its required copyright notice and license remain in [LICENSE](LICENSE).
+This project began from OpenOats and has since been substantially reworked as
+an interview copilot. The repository keeps that commit history for traceability.
+OpenOats is MIT licensed; its required copyright notice and license remain in
+[LICENSE](LICENSE).
